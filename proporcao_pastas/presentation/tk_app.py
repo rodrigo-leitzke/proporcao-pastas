@@ -435,7 +435,6 @@ class App:
                 cv.create_arc(*box, start=90 - inicio, extent=-graus, fill=cor,
                               outline="white", width=2, style="pieslice")
             acumulado = fim
-            ang -= graus
         cv.create_oval(CENTRO - RAIO_FURO, CENTRO - RAIO_FURO,
                        CENTRO + RAIO_FURO, CENTRO + RAIO_FURO,
                        fill="white", outline="white")  # furo da rosca
