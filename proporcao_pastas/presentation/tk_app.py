@@ -383,7 +383,12 @@ class App:
             return
         graus = (90 - math.degrees(math.atan2(dy, dx))) % 360  # horario, a partir do topo
         for i, (ini, fim) in enumerate(self.faixas):
-            if ini <= graus < fim:
+            dentro = (
+                ini <= graus < fim
+                if fim <= 360
+                else graus >= ini or graus < fim - 360
+            )
+            if dentro:
                 self.tab.selection_toggle(self.ids[i])
                 break
 
@@ -408,26 +413,28 @@ class App:
         soma = sum(i[1] for i in lista)
         tem_sel = bool(self.sel_idx)
         explodir = tem_sel and len(self.sel_idx) < len(lista)
-        ang = 90  # comeca no topo e segue no sentido horario
+        acumulado = 0
         for i, (_, s, eh_pasta) in enumerate(lista):
             cor = CINZA if eh_pasta is None else CORES[i % len(CORES)]
             graus = s / soma * 360
-            inicio = (90 - ang) % 360
-            self.faixas.append((inicio, inicio + graus))
+            inicio = acumulado
+            fim = acumulado + graus
+            self.faixas.append((inicio, fim))
             marcada = i in self.sel_idx
             if tem_sel and not marcada:
                 cor = clarear(cor)
             dx = dy = 0
             if explodir and marcada:
-                meio = math.radians(ang - graus / 2)
+                meio = math.radians(90 - inicio - graus / 2)
                 dx, dy = EXPLOSAO * math.cos(meio), -EXPLOSAO * math.sin(meio)
             box = (CENTRO - RAIO + dx, CENTRO - RAIO + dy,
                    CENTRO + RAIO + dx, CENTRO + RAIO + dy)
             if graus >= 359.9:
                 cv.create_oval(*box, fill=cor, outline="white", width=2)
             else:
-                cv.create_arc(*box, start=ang, extent=-graus, fill=cor,
+                cv.create_arc(*box, start=90 - inicio, extent=-graus, fill=cor,
                               outline="white", width=2, style="pieslice")
+            acumulado = fim
             ang -= graus
         cv.create_oval(CENTRO - RAIO_FURO, CENTRO - RAIO_FURO,
                        CENTRO + RAIO_FURO, CENTRO + RAIO_FURO,
