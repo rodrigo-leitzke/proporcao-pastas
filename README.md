@@ -39,6 +39,23 @@ No Windows 11 a opção aparece em "Mostrar mais opções".
 - O cálculo roda em uma thread separada, então a interface não trava em pastas grandes.
 - Links simbólicos são ignorados, para não contar o mesmo conteúdo duas vezes; pastas sem permissão de leitura contam como 0.
 
+## Organização do código
+
+O projeto é dividido em camadas, mantendo `proporcao_pastas.py` como ponto de
+entrada compatível:
+
+- `proporcao_pastas/domain`: modelos e regras sem dependência de interface ou
+  sistema operacional.
+- `proporcao_pastas/application`: casos de uso, como a análise de uma pasta.
+- `proporcao_pastas/infrastructure`: leitura do sistema de arquivos e
+  integração com o registro do Windows.
+- `proporcao_pastas/presentation`: interface Tkinter e gerenciamento dos
+  eventos da tela.
+
+Essa separação permite testar o cálculo e a leitura de pastas sem iniciar a
+interface gráfica e deixa a apresentação dependente dos casos de uso, não do
+detalhe de como o sistema de arquivos é consultado.
+
 ## Limitações
 
 - O tamanho exibido é o tamanho lógico dos arquivos, não o espaço ocupado em disco. Arquivos do OneDrive disponíveis só online contam com o tamanho cheio.
