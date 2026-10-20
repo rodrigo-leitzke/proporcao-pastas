@@ -408,12 +408,12 @@ class App:
         soma = sum(i[1] for i in lista)
         tem_sel = bool(self.sel_idx)
         explodir = tem_sel and len(self.sel_idx) < len(lista)
-        ang, acumulado = 90, 0  # comeca no topo e segue no sentido horario
+        ang = 90  # comeca no topo e segue no sentido horario
         for i, (_, s, eh_pasta) in enumerate(lista):
             cor = CINZA if eh_pasta is None else CORES[i % len(CORES)]
             graus = s / soma * 360
-            self.faixas.append((acumulado, acumulado + graus))
-            acumulado += graus
+            inicio = (90 - ang) % 360
+            self.faixas.append((inicio, inicio + graus))
             marcada = i in self.sel_idx
             if tem_sel and not marcada:
                 cor = clarear(cor)
@@ -442,4 +442,3 @@ class App:
 
     def rodar(self):
         self.w.mainloop()
-
