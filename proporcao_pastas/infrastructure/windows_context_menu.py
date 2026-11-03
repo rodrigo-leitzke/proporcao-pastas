@@ -1,9 +1,12 @@
-"""Integracao opcional com o menu de contexto do Windows."""
+"""Integracao opcional com o menu de contexto do Windows (com deteccao automatica de SO)."""
 import os
+import platform
 import sys
 
+from proporcao_pastas.infrastructure.macos_context_menu import configure_macos_context_menu
 
-def configure_context_menu(script_path: str, remove: bool = False) -> None:
+
+def configure_windows_context_menu(script_path: str, remove: bool = False) -> None:
     import winreg
 
     pythonw = sys.executable.replace("python.exe", "pythonw.exe")
@@ -34,3 +37,13 @@ def configure_context_menu(script_path: str, remove: bool = False) -> None:
                 f'"{pythonw}" "{script_path}" "{variable}"',
             )
     print("Menu removido." if remove else "Menu instalado: clique direito em uma pasta.")
+
+
+def configure_context_menu(script_path: str, remove: bool = False) -> None:
+    sistema = platform.system()
+    if sistema == "Windows" or os.name == "nt":
+        configure_windows_context_menu(script_path, remove=remove)
+    elif sistema == "Darwin" or sys.platform == "darwin":
+        configure_macos_context_menu(script_path, remove=remove)
+    else:
+        print(f"Integração de menu de contexto não suportada para o sistema: {sistema}.")

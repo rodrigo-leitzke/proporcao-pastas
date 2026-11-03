@@ -1,20 +1,24 @@
 """
 Proporcao de pastas: ao clicar em uma pasta, mostra quanto ela ocupa da pasta
 pai e como o espaco dela se divide entre subpastas e arquivos (grafico de pizza).
-Ao selecionar varios itens da tabela (Ctrl/Shift+clique) ou fatias da pizza,
+Ao selecionar varios itens da tabela (Ctrl/Cmd/Shift+clique) ou fatias da pizza,
 soma os selecionados e mostra quanto representam da pasta.
 
 Uso:
     python proporcao_pastas.py                 abre e pergunta a pasta inicial
-    python proporcao_pastas.py "C:\\Users\\x"   abre direto nessa pasta
+    python proporcao_pastas.py "C:\\Users\\x"   abre direto nessa pasta (Windows)
+    python proporcao_pastas.py "/Users/x"      abre direto nessa pasta (macOS)
     python proporcao_pastas.py --instalar      adiciona ao menu de clique direito
     python proporcao_pastas.py --remover       remove do menu de clique direito
 
-So usa a biblioteca padrao do Python (tkinter e winreg), sem instalar nada.
+So usa a biblioteca padrao do Python (tkinter), sem instalar nada.
 """
 import math
 import os
+import platform
 import queue
+import subprocess
+import sys
 import threading
 import traceback
 import tkinter as tk
@@ -25,14 +29,22 @@ from proporcao_pastas.domain.formatting import clarear_cor as clarear
 from proporcao_pastas.domain.formatting import formatar_tamanho as fmt
 from proporcao_pastas.infrastructure.file_system import FileSystemScanner
 
+SISTEMA = platform.system()
+IS_MAC = SISTEMA == "Darwin" or sys.platform == "darwin"
+IS_WINDOWS = SISTEMA == "Windows" or os.name == "nt"
+FONTE_PADRAO = "Segoe UI" if IS_WINDOWS else ("Helvetica Neue" if IS_MAC else "DejaVu Sans")
+MOD_TECLA = "Cmd" if IS_MAC else "Ctrl"
+NOME_GERENCIADOR = "Explorer" if IS_WINDOWS else ("Finder" if IS_MAC else "Arquivos")
+
 CORES = ["#4E79A7", "#F28E2B", "#E15759", "#76B7B2",
          "#59A14F", "#EDC948", "#B07AA1", "#9C755F"]
 CINZA = "#BAB0AC"
 AZUL_EXPLORER = "#26A0DA"
 FUNDO_BARRA = "#F3F3F3"
-DICA = "Para somar: Ctrl+clique ou Shift+clique nos itens da tabela (ou clique nas fatias da pizza)"
-COR_DICA, FONTE_DICA = "#777777", ("Segoe UI", 9)
-COR_SEL, FONTE_SEL = "#0B6FA4", ("Segoe UI", 10, "bold")
+COR_TEXTO = "#111111"
+DICA = f"Para somar: {MOD_TECLA}+clique ou Shift+clique nos itens da tabela (ou clique nas fatias da pizza)"
+COR_DICA, FONTE_DICA = "#777777", (FONTE_PADRAO, 9)
+COR_SEL, FONTE_SEL = "#0B6FA4", (FONTE_PADRAO, 10, "bold")
 # geometria da pizza (canvas 300x300)
 CENTRO = 150
 RAIO = 132
@@ -57,7 +69,7 @@ def quadrado(master, cor):
 
 # ---------------------------------------------------------------- interface
 class App:
-    def __init__(self, raiz, pai_na_raiz):
+    def __init__(self, raiz, pai_na_raiz, master=None):
         self.pai_na_raiz = pai_na_raiz
         self.raiz = raiz
         self.scanner = FileSystemScanner()
@@ -76,19 +88,28 @@ class App:
         self.marcar = set()      # nomes a pre-selecionar na tabela (multi-selecao na arvore)
         self.fila = queue.Queue()
 
-        self.w = tk.Tk()
+        self.w = master if master is not None else tk.Tk()
+        self.w.deiconify()
         self.w.title("Proporção de pastas")
         self.w.geometry("1120x680")
         self.w.minsize(900, 560)
         self.w.report_callback_exception = self.erro  # mostra erros na barra de status
 
         estilo = ttk.Style(self.w)
+        tema_preferido = "vista" if IS_WINDOWS else "clam"
         try:
-            estilo.theme_use("vista")  # visual nativo do Windows
+            estilo.theme_use(tema_preferido)
         except tk.TclError:
             pass
-        estilo.configure("Treeview", rowheight=22, font=("Segoe UI", 9))
-        estilo.configure("Treeview.Heading", font=("Segoe UI", 9))
+        estilo.configure(
+            "Treeview",
+            rowheight=22,
+            font=(FONTE_PADRAO, 9),
+            background="white",
+            fieldbackground="white",
+            foreground=COR_TEXTO,
+        )
+        estilo.configure("Treeview.Heading", font=(FONTE_PADRAO, 9))
 
         self.ic_pasta = icone_pasta(self.w)
         self.ic_grande = self.ic_pasta.zoom(3)
@@ -96,20 +117,20 @@ class App:
 
         # barra de status (embaixo)
         self.status = tk.Label(self.w, text="Pronto", anchor="w", bg=FUNDO_BARRA,
-                               font=("Segoe UI", 9), padx=8, pady=3)
+                               fg=COR_TEXTO, font=(FONTE_PADRAO, 9), padx=8, pady=3)
         self.status.pack(side="bottom", fill="x")
 
         # barra de ferramentas (em cima)
         barra = tk.Frame(self.w, bg=FUNDO_BARRA, padx=8, pady=6)
         barra.pack(side="top", fill="x")
-        tk.Label(barra, text="Pasta:", bg=FUNDO_BARRA,
-                 font=("Segoe UI", 9)).pack(side="left")
+        tk.Label(barra, text="Pasta:", bg=FUNDO_BARRA, fg=COR_TEXTO,
+                 font=(FONTE_PADRAO, 9)).pack(side="left")
         self.endereco = tk.StringVar()
         ttk.Entry(barra, textvariable=self.endereco, state="readonly").pack(
             side="left", fill="x", expand=True, padx=6)
         ttk.Button(barra, text="Atualizar", command=self.atualizar).pack(side="left", padx=2)
         ttk.Button(barra, text="Trocar pasta...", command=self.trocar).pack(side="left", padx=2)
-        ttk.Button(barra, text="Abrir no Explorer", command=self.abrir_explorer).pack(side="left", padx=2)
+        ttk.Button(barra, text=f"Abrir no {NOME_GERENCIADOR}", command=self.abrir_explorer).pack(side="left", padx=2)
 
         painel = ttk.PanedWindow(self.w, orient="horizontal")
         painel.pack(fill="both", expand=True)
@@ -132,14 +153,14 @@ class App:
         tk.Label(topo, image=self.ic_grande, bg="white").pack(side="left")
         txt = tk.Frame(topo, bg="white")
         txt.pack(side="left", fill="x", expand=True, padx=12)
-        self.nome = tk.Label(txt, bg="white", font=("Segoe UI", 15), anchor="w")
+        self.nome = tk.Label(txt, bg="white", fg=COR_TEXTO, font=(FONTE_PADRAO, 15), anchor="w")
         self.nome.pack(fill="x")
-        self.caminho = tk.Label(txt, bg="white", fg="#666666", font=("Segoe UI", 9),
+        self.caminho = tk.Label(txt, bg="white", fg="#666666", font=(FONTE_PADRAO, 9),
                                 anchor="w", justify="left", wraplength=700)
         self.caminho.pack(fill="x")
 
         # uso da pasta atual em relacao a pasta pai
-        self.uso = tk.Label(dir_, bg="white", font=("Segoe UI", 10), anchor="w")
+        self.uso = tk.Label(dir_, bg="white", fg=COR_TEXTO, font=(FONTE_PADRAO, 10), anchor="w")
         self.uso.pack(fill="x", padx=16)
         self.barra = tk.Canvas(dir_, height=16, bg="white", highlightthickness=0)
         self.barra.pack(fill="x", padx=16, pady=(2, 10))
@@ -177,6 +198,10 @@ class App:
         self.tab.bind("<Double-1>", self.entrar_na_pasta)
         self.tab.bind("<<TreeviewSelect>>", self.selecao_mudou)
         self.tab.bind("<Control-a>", self.selecionar_tudo)
+        self.tab.bind("<Control-A>", self.selecionar_tudo)
+        if IS_MAC:
+            self.tab.bind("<Command-a>", self.selecionar_tudo)
+            self.tab.bind("<Command-A>", self.selecionar_tudo)
 
         self.tree.bind("<<TreeviewOpen>>", lambda e: self.popular(self.tree.focus()))
         self.tree.bind("<<TreeviewSelect>>", self.selecionar)
@@ -234,8 +259,18 @@ class App:
 
     def abrir_explorer(self):
         sel = self.tree.selection()
-        if sel and sel[0] in self.nos and hasattr(os, "startfile"):
-            os.startfile(self.nos[sel[0]])
+        if not sel or sel[0] not in self.nos:
+            return
+        caminho = self.nos[sel[0]]
+        try:
+            if IS_WINDOWS and hasattr(os, "startfile"):
+                os.startfile(caminho)
+            elif IS_MAC:
+                subprocess.Popen(["open", caminho])
+            else:
+                subprocess.Popen(["xdg-open", caminho])
+        except OSError as exc:
+            self.status.config(text=f"Não foi possível abrir a pasta: {exc}", fg="#B00020")
 
     def entrar_na_pasta(self, evento):
         """Duplo clique numa subpasta da tabela: seleciona ela na arvore."""
@@ -264,7 +299,7 @@ class App:
                 self.analisar(pais.pop(), marcar={os.path.basename(c) for c in caminhos})
             else:
                 self.status.config(text="Para somar, selecione pastas que estejam "
-                                        "dentro da mesma pasta.", fg="black")
+                                        "dentro da mesma pasta.", fg=COR_TEXTO)
 
     def analisar(self, path, marcar=()):
         self.token += 1
@@ -276,7 +311,7 @@ class App:
         self.caminho.config(text=path)
         self.uso.config(text="Calculando...")
         self.status.config(text="Calculando... (a primeira leitura de pastas grandes pode demorar)",
-                           fg="black")
+                           fg=COR_TEXTO)
         self.pct = None
         self.desenhar_barra(self.barra, None)
         self.pct_sel = None
@@ -323,14 +358,16 @@ class App:
             self.uso.config(text=f"Tamanho total: {fmt(total)}")
         self.desenhar_barra(self.barra, self.pct)
         self.status.config(text=f"Pronto  |  {len(lista)} itens exibidos  |  "
-                                f"Ctrl/Shift+clique para somar vários itens")
+                                f"{MOD_TECLA}/Shift+clique para somar vários itens",
+                           fg=COR_TEXTO)
         self.preencher_tabela(path, lista)
         self.pronto = True
         self.desenhar_pizza()
         if self.marcar:  # veio de multi-selecao na arvore: destaca as pastas escolhidas
             self.tab.selection_set([self.ids[i] for i, (n, _, p) in enumerate(lista)
                                     if p and n in self.marcar])
-            self.status.config(text="Mostrando a pasta pai com as pastas selecionadas destacadas")
+            self.status.config(text="Mostrando a pasta pai com as pastas selecionadas destacadas",
+                               fg=COR_TEXTO)
 
     def preencher_tabela(self, path, lista):
         soma = sum(i[1] for i in lista) or 1
@@ -408,7 +445,7 @@ class App:
         self.faixas = []
         if not lista:
             cv.create_text(CENTRO, CENTRO, text="Pasta vazia",
-                           font=("Segoe UI", 12), fill="#666666")
+                           font=(FONTE_PADRAO, 12), fill="#666666")
             return
         soma = sum(i[1] for i in lista)
         tem_sel = bool(self.sel_idx)
@@ -443,8 +480,8 @@ class App:
             legenda = "selecionados" if len(self.sel_idx) > 1 else "selecionado"
         else:
             valor, legenda = self.total, "nesta pasta"
-        cv.create_text(CENTRO, CENTRO - 8, text=fmt(valor), font=("Segoe UI", 13, "bold"))
-        cv.create_text(CENTRO, CENTRO + 14, text=legenda, font=("Segoe UI", 9), fill="#666666")
+        cv.create_text(CENTRO, CENTRO - 8, text=fmt(valor), font=(FONTE_PADRAO, 13, "bold"), fill=COR_TEXTO)
+        cv.create_text(CENTRO, CENTRO + 14, text=legenda, font=(FONTE_PADRAO, 9), fill="#666666")
 
     def rodar(self):
         self.w.mainloop()
