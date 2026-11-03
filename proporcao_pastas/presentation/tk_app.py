@@ -25,8 +25,13 @@ import tkinter as tk
 from tkinter import ttk, filedialog
 
 from proporcao_pastas.application.analyze_folder import AnalyzeFolder
-from proporcao_pastas.domain.formatting import clarear_cor as clarear
-from proporcao_pastas.domain.formatting import formatar_tamanho as fmt
+from proporcao_pastas.domain.formatting import (
+    clarear_cor as clarear,
+    formatar_contagem,
+    formatar_data,
+    formatar_tamanho as fmt,
+    formatar_tipo_item,
+)
 from proporcao_pastas.infrastructure.file_system import FileSystemScanner
 
 SISTEMA = platform.system()
@@ -91,8 +96,19 @@ class App:
         self.w = master if master is not None else tk.Tk()
         self.w.deiconify()
         self.w.title("Proporção de pastas")
-        self.w.geometry("1120x680")
-        self.w.minsize(900, 560)
+        larg_tela = self.w.winfo_screenwidth()
+        alt_tela = self.w.winfo_screenheight()
+        larg = min(1280, max(960, larg_tela - 40))
+        alt = min(700, max(560, alt_tela - 80))
+        pos_x = max((larg_tela - larg) // 2, 0)
+        pos_y = max((alt_tela - alt) // 2, 0)
+        self.w.geometry(f"{larg}x{alt}+{pos_x}+{pos_y}")
+        self.w.minsize(920, 560)
+        if IS_MAC:
+            self.w.lift()
+            self.w.attributes("-topmost", True)
+            self.w.after(200, lambda: self.w.attributes("-topmost", False))
+            self.w.focus_force()
         self.w.report_callback_exception = self.erro  # mostra erros na barra de status
 
         estilo = ttk.Style(self.w)
@@ -184,17 +200,38 @@ class App:
         self.cv.pack(side="left", anchor="n")
         self.cv.bind("<Button-1>", self.clique_pizza)
 
-        self.tab = ttk.Treeview(self.corpo, columns=("tam", "pct", "tipo"), height=10,
+        tab_frame = tk.Frame(self.corpo, bg="white")
+        tab_frame.pack(side="left", fill="both", expand=True, padx=(12, 0))
+
+        colunas = ("tam", "pct", "tipo", "itens", "maior", "modificado", "criado", "perm")
+        self.tab = ttk.Treeview(tab_frame, columns=colunas, height=10,
                                 selectmode="extended")
         self.tab.heading("#0", text="Nome", anchor="w")
         self.tab.heading("tam", text="Tamanho", anchor="e")
         self.tab.heading("pct", text="%", anchor="e")
-        self.tab.heading("tipo", text="Tipo", anchor="w")
-        self.tab.column("#0", width=220, stretch=True)
-        self.tab.column("tam", width=90, anchor="e", stretch=False)
-        self.tab.column("pct", width=60, anchor="e", stretch=False)
-        self.tab.column("tipo", width=70, anchor="w", stretch=False)
-        self.tab.pack(side="left", fill="both", expand=True, padx=(12, 0))
+        self.tab.heading("tipo", text="Tipo / Ext.", anchor="w")
+        self.tab.heading("itens", text="Conteúdo", anchor="w")
+        self.tab.heading("maior", text="Maior Arquivo", anchor="w")
+        self.tab.heading("modificado", text="Modificado em", anchor="center")
+        self.tab.heading("criado", text="Criado em", anchor="center")
+        self.tab.heading("perm", text="Permissões", anchor="center")
+
+        self.tab.column("#0", width=180, minwidth=130, stretch=True)
+        self.tab.column("tam", width=85, anchor="e", stretch=False)
+        self.tab.column("pct", width=55, anchor="e", stretch=False)
+        self.tab.column("tipo", width=95, anchor="w", stretch=False)
+        self.tab.column("itens", width=105, anchor="w", stretch=False)
+        self.tab.column("maior", width=150, minwidth=110, anchor="w", stretch=True)
+        self.tab.column("modificado", width=115, anchor="center", stretch=False)
+        self.tab.column("criado", width=115, anchor="center", stretch=False)
+        self.tab.column("perm", width=85, anchor="center", stretch=False)
+
+        sb_tab_y = ttk.Scrollbar(tab_frame, orient="vertical", command=self.tab.yview)
+        sb_tab_x = ttk.Scrollbar(tab_frame, orient="horizontal", command=self.tab.xview)
+        self.tab.configure(yscrollcommand=sb_tab_y.set, xscrollcommand=sb_tab_x.set)
+        sb_tab_y.pack(side="right", fill="y")
+        sb_tab_x.pack(side="bottom", fill="x")
+        self.tab.pack(side="left", fill="both", expand=True)
         self.tab.bind("<Double-1>", self.entrar_na_pasta)
         self.tab.bind("<<TreeviewSelect>>", self.selecao_mudou)
         self.tab.bind("<Control-a>", self.selecionar_tudo)
@@ -332,6 +369,7 @@ class App:
             resultado.total,
             resultado.parent_total,
             resultado.items,
+            resultado.folder_stats,
             tok,
         ))
 
@@ -345,17 +383,20 @@ class App:
             self.w.after(100, self.poll)
 
     # ---------- exibicao ----------
-    def mostrar(self, path, total, total_pai, lista, tok):
+    def mostrar(self, path, total, total_pai, lista, folder_stats, tok):
         if tok != self.token:  # usuario ja clicou em outra pasta
             return
         self.lista, self.total, self.sel_idx = lista, total, set()
+        resumo_pasta = f"{folder_stats.arquivos} arquivos, {folder_stats.subpastas} subpastas"
+        if folder_stats.maior_arquivo_nome:
+            resumo_pasta += f"  |  Maior arq.: {folder_stats.maior_arquivo_nome} ({fmt(folder_stats.maior_arquivo_tam)})"
         if total_pai:
             self.pct = total / total_pai * 100
             self.uso.config(text=f"{fmt(total)} de {fmt(total_pai)} da pasta pai "
-                                 f"({self.pct:.1f}%)")
+                                 f"({self.pct:.1f}%)   •   {resumo_pasta}")
         else:
             self.pct = None
-            self.uso.config(text=f"Tamanho total: {fmt(total)}")
+            self.uso.config(text=f"Tamanho total: {fmt(total)}   •   {resumo_pasta}")
         self.desenhar_barra(self.barra, self.pct)
         self.status.config(text=f"Pronto  |  {len(lista)} itens exibidos  |  "
                                 f"{MOD_TECLA}/Shift+clique para somar vários itens",
@@ -372,11 +413,34 @@ class App:
     def preencher_tabela(self, path, lista):
         soma = sum(i[1] for i in lista) or 1
         self.ids = []
-        for i, (nome, s, eh_pasta) in enumerate(lista):
+        for i, item in enumerate(lista):
+            nome, s, eh_pasta = item[0], item[1], item[2]
             cor = CINZA if eh_pasta is None else CORES[i % len(CORES)]
-            tipo = "—" if eh_pasta is None else ("Pasta" if eh_pasta else "Arquivo")
-            iid = self.tab.insert("", "end", text=nome, image=self.quadrados[cor],
-                                  values=(fmt(s), f"{s / soma * 100:.1f}%", tipo))
+            tipo = getattr(item, "tipo_detalhado", None) or formatar_tipo_item(nome, eh_pasta)
+            arquivos = getattr(item, "arquivos", 0)
+            subpastas = getattr(item, "subpastas", 0)
+            conteudo = formatar_contagem(eh_pasta, arquivos, subpastas)
+            maior = getattr(item, "maior_arquivo", "—")
+            modificado = formatar_data(getattr(item, "modificado_em", None))
+            criado = formatar_data(getattr(item, "criado_em", None))
+            perm = getattr(item, "permissoes", "—")
+
+            iid = self.tab.insert(
+                "",
+                "end",
+                text=nome,
+                image=self.quadrados[cor],
+                values=(
+                    fmt(s),
+                    f"{s / soma * 100:.1f}%",
+                    tipo,
+                    conteudo,
+                    maior,
+                    modificado,
+                    criado,
+                    perm,
+                ),
+            )
             self.ids.append(iid)
             if eh_pasta:
                 self.linhas[iid] = os.path.join(path, nome)
@@ -402,11 +466,14 @@ class App:
             return
         soma = sum(i[1] for i in self.lista) or 1
         sel = sum(self.lista[i][1] for i in self.sel_idx)
+        sel_arq = sum(getattr(self.lista[i], "arquivos", 0) for i in self.sel_idx)
+        sel_sub = sum(getattr(self.lista[i], "subpastas", 0) for i in self.sel_idx)
         n = len(self.sel_idx)
         self.pct_sel = sel / soma * 100
         self.sel_texto.config(
             text=f"{n} {'item selecionado' if n == 1 else 'itens selecionados'}: "
-                 f"{fmt(sel)} de {fmt(soma)} ({self.pct_sel:.1f}%)",
+                 f"{fmt(sel)} de {fmt(soma)} ({self.pct_sel:.1f}%)   •   "
+                 f"{sel_arq} arq, {sel_sub} subpastas",
             fg=COR_SEL, font=FONTE_SEL)
         self.desenhar_barra(self.barra_sel, self.pct_sel)
 
