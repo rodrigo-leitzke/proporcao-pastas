@@ -6,7 +6,14 @@ Programa multiplataforma (Windows e macOS), feito em Python, que mostra quanto c
 
 - Identifica automaticamente o sistema operacional (`Windows` ou `macOS` / `Darwin`) ao iniciar.
 - Árvore de pastas à esquerda, no estilo do Explorer/Finder, com carregamento sob demanda.
-- Ao clicar em uma pasta, mostra o tamanho dela e a porcentagem em relação à pasta pai, com barra de uso.
+- Ao clicar em uma pasta, mostra o tamanho dela, a porcentagem em relação à pasta pai (com barra de uso), o total de arquivos/subpastas e o maior arquivo.
+- Tabela detalhada com informações específicas de cada arquivo e subpasta:
+  - **Tamanho** e **%** em relação à pasta atual.
+  - **Tipo / Extensão** detalhada (ex.: `Pasta`, `Arq (.py)`, `Arq (.pdf)`).
+  - **Conteúdo** interno acumulado (quantidade de arquivos e subpastas).
+  - **Maior Arquivo** encontrado dentro de cada subpasta.
+  - **Modificado em** e **Criado em** (datas de metadados do sistema de arquivos).
+  - **Permissões** de acesso do Sistema Operacional (formato POSIX `drwxr-xr-x` / `-rw-r--r--`).
 - Gráfico de pizza (rosca) com a divisão da pasta entre subpastas e arquivos; o excedente é agrupado em "Outros".
 - Soma de itens: selecione vários itens na tabela (`Ctrl` no Windows / `Cmd` no macOS ou `Shift` + clique), fatias da pizza ou várias pastas irmãs na árvore para ver quanto representam da pasta (exemplo: 2 arquivos de 100 MB em uma pasta de 300 MB = 200 MB de 300 MB, 66,7%).
 - Duplo clique em uma subpasta da tabela navega até ela.

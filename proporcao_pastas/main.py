@@ -9,6 +9,7 @@ from proporcao_pastas.infrastructure.windows_context_menu import configure_conte
 def main() -> None:
     sistema = platform.system()
     is_windows = sistema == "Windows" or os.name == "nt"
+    is_mac = sistema == "Darwin" or sys.platform == "darwin"
 
     arg = sys.argv[1] if len(sys.argv) > 1 else None
     if arg in ("--instalar", "--remover"):
@@ -33,8 +34,10 @@ def main() -> None:
     else:
         root = tk.Tk()
         root.withdraw()
+        if is_mac:
+            root.update_idletasks()
         path, include_root_parent = filedialog.askdirectory(
-            parent=root, title="Escolha a pasta inicial"
+            title="Escolha a pasta inicial"
         ), False
         if path:
             App(
