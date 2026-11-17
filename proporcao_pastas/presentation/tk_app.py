@@ -5,7 +5,7 @@ Ao selecionar varios itens da tabela (Ctrl/Cmd/Shift+clique) ou fatias da pizza,
 soma os selecionados e mostra quanto representam da pasta.
 
 Uso:
-    python proporcao_pastas.py                 abre direto em todas as raizes do sistema
+    python proporcao_pastas.py                 abre nas raizes do sistema, sem varrer disco
     python proporcao_pastas.py "C:\\Users\\x"   abre direto nessa pasta (Windows)
     python proporcao_pastas.py "/Users/x"      abre direto nessa pasta (macOS)
     python proporcao_pastas.py --instalar      adiciona ao menu de clique direito
