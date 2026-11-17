@@ -5,7 +5,7 @@ Ao selecionar varios itens da tabela (Ctrl/Cmd/Shift+clique) ou fatias da pizza,
 soma os selecionados e mostra quanto representam da pasta.
 
 Uso:
-    python proporcao_pastas.py                 abre e pergunta a pasta inicial
+    python proporcao_pastas.py                 abre direto em todas as raizes do sistema
     python proporcao_pastas.py "C:\\Users\\x"   abre direto nessa pasta (Windows)
     python proporcao_pastas.py "/Users/x"      abre direto nessa pasta (macOS)
     python proporcao_pastas.py --instalar      adiciona ao menu de clique direito
@@ -34,7 +34,7 @@ from proporcao_pastas.domain.formatting import (
     formatar_tipo_item,
 )
 from proporcao_pastas.infrastructure.cache_storage import SqliteCacheStorage, caminho_padrao_cache
-from proporcao_pastas.infrastructure.file_system import FileSystemScanner
+from proporcao_pastas.infrastructure.file_system import FileSystemScanner, raiz_de
 
 SISTEMA = platform.system()
 IS_MAC = SISTEMA == "Darwin" or sys.platform == "darwin"
@@ -289,21 +289,29 @@ class App:
             for nome in self.scanner.subfolders(self.nos[iid]):
                 self.inserir(iid, os.path.join(self.nos[iid], nome), nome)
 
-    def definir_raiz(self, caminho):
-        self.raiz = caminho
+    def definir_raizes(self, caminhos):
+        self.raizes = list(caminhos)
+        self.raiz = self.raizes[0]
         for i in self.tree.get_children():
             self.tree.delete(i)
         self.nos.clear()
-        iid = self.inserir("", caminho, os.path.basename(caminho) or caminho)
-        self.popular(iid)
-        self.tree.item(iid, open=True)
-        self.tree.selection_set(iid)
+        primeiro = None
+        for caminho in self.raizes:
+            iid = self.inserir("", caminho, os.path.basename(caminho.rstrip(os.sep)) or caminho)
+            primeiro = primeiro or iid
+        if primeiro:
+            self.popular(primeiro)
+            self.tree.item(primeiro, open=True)
+            self.tree.selection_set(primeiro)
+
+    def definir_raiz(self, caminho):
+        self.definir_raizes([caminho])
 
     def trocar(self):
         p = filedialog.askdirectory(title="Escolha a pasta inicial", initialdir=self.raiz)
         if p:
             self.pai_na_raiz = False
-            self.definir_raiz(os.path.normpath(p))
+            self.definir_raizes([os.path.normpath(p)])
 
     def atualizar_cache(self):
         """Revarre so a pasta selecionada e corrige os ancestrais."""
@@ -379,13 +387,14 @@ class App:
                          args=(path, tok, self.marcar, revarrer), daemon=True).start()
 
     def trabalho(self, path, tok, marcar, revarrer=False):
+        raiz = raiz_de(path, self.raizes)
         if revarrer:
             resultado = self.analyze_folder.refresh(
-                path, self.raiz, self.pai_na_raiz, marcar,
+                path, raiz, self.pai_na_raiz, marcar,
                 progresso=lambda p: self.fila_status.put(f"Revarrendo {p}..."),
             )
         else:
-            resultado = self.analyze_folder.execute(path, self.raiz, self.pai_na_raiz, marcar)
+            resultado = self.analyze_folder.execute(path, raiz, self.pai_na_raiz, marcar)
         self.fila.put((resultado, tok))
 
     def poll(self):

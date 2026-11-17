@@ -332,3 +332,12 @@ def parent_analysis_path(path: str, root: str, include_root_parent: bool) -> Tup
     parent = os.path.dirname(path)
     has_parent = bool(parent and parent != path and (path != root or include_root_parent))
     return parent, has_parent
+
+
+def raiz_de(path: str, raizes: List[str]) -> str:
+    """Raiz mais especifica que contem o caminho; o proprio caminho se nenhuma contiver."""
+    candidatas = [
+        r for r in raizes
+        if path == r or path.startswith(r.rstrip(os.sep) + os.sep)
+    ]
+    return max(candidatas, key=len) if candidatas else path
