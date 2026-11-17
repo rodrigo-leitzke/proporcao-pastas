@@ -62,6 +62,19 @@ EXPLOSAO = 8  # quanto as fatias selecionadas saem do centro
 # poll (thread principal) reconhece e restaura o botao, sem imprimir na barra
 FIM_MAPEAMENTO = "\x00fim-mapeamento"
 
+
+def deve_analisar_na_abertura(raiz, storage) -> bool:
+    """Diz se a pasta inicial pode ser analisada ja na abertura.
+
+    Varrer uma raiz de disco inteira leva de minutos a dezenas de minutos, e a
+    analise comum nao tem progresso nem cancelamento (isso e o 'Mapear discos').
+    Entao, no modo multi-raiz, so analisa de cara a raiz que ja esta em cache,
+    onde a leitura e instantanea. Sem cache, o programa abre parado."""
+    if storage is None:
+        return False
+    return storage.get_folder(raiz) is not None
+
+
 # ---------------------------------------------------------------- icones
 def icone_pasta(master):
     """Pasta amarela 16x16 desenhada pixel a pixel (sem arquivos externos)."""
@@ -80,9 +93,11 @@ def quadrado(master, cor):
 
 # ---------------------------------------------------------------- interface
 class App:
-    def __init__(self, raiz, pai_na_raiz, master=None, storage=None):
+    def __init__(self, raiz, pai_na_raiz, master=None, storage=None, raizes=None):
         self.pai_na_raiz = pai_na_raiz
         self.raiz = raiz
+        self.raizes = list(raizes) if raizes else [raiz]
+        self.ignorar_selecao = None  # id da arvore cuja selecao automatica nao analisa
         self.storage = storage if storage is not None else SqliteCacheStorage(caminho_padrao_cache())
         self.scanner = FileSystemScanner(storage=self.storage)
         self.analyze_folder = AnalyzeFolder(self.scanner)
@@ -261,7 +276,14 @@ class App:
         self.tree.bind("<<TreeviewOpen>>", lambda e: self.popular(self.tree.focus()))
         self.tree.bind("<<TreeviewSelect>>", self.selecionar)
 
-        self.definir_raiz(raiz)
+        # arvore montada uma unica vez: cada selection_set enfileira um
+        # <<TreeviewSelect>> e, com ele, uma analise em thread
+        if raizes:
+            self.definir_raizes(
+                self.raizes, analisar=deve_analisar_na_abertura(self.raizes[0], self.storage)
+            )
+        else:  # caminho passado na linha de comando: o usuario pediu essa pasta
+            self.definir_raiz(raiz)
         self.w.protocol("WM_DELETE_WINDOW", self.fechar)
         self.w.after(100, self.poll)
 
@@ -297,7 +319,7 @@ class App:
             for nome in self.scanner.subfolders(self.nos[iid]):
                 self.inserir(iid, os.path.join(self.nos[iid], nome), nome)
 
-    def definir_raizes(self, caminhos):
+    def definir_raizes(self, caminhos, analisar=True):
         self.raizes = list(caminhos)
         self.raiz = self.raizes[0]
         for i in self.tree.get_children():
@@ -310,7 +332,13 @@ class App:
         if primeiro:
             self.popular(primeiro)
             self.tree.item(primeiro, open=True)
+            # selection_set enfileira um <<TreeviewSelect>>, que cai em
+            # selecionar(); guardar o id deixa selecionar() ignorar so essa
+            # selecao automatica, sem engolir o proximo clique do usuario
+            self.ignorar_selecao = None if analisar else primeiro
             self.tree.selection_set(primeiro)
+            if not analisar:
+                self.mostrar_sem_analise(self.raiz)
 
     def definir_raiz(self, caminho):
         self.definir_raizes([caminho])
@@ -380,6 +408,10 @@ class App:
 
     # ---------- analise em segundo plano ----------
     def selecionar(self, _evento):
+        if self.ignorar_selecao is not None:
+            alvo, self.ignorar_selecao = self.ignorar_selecao, None
+            if list(self.tree.selection()) == [alvo]:
+                return  # selecao feita por definir_raizes, nao pelo usuario
         sel = [i for i in self.tree.selection() if i in self.nos]
         if len(sel) == 1:
             self.analisar(self.nos[sel[0]])
@@ -392,17 +424,11 @@ class App:
                 self.status.config(text="Para somar, selecione pastas que estejam "
                                         "dentro da mesma pasta.", fg=COR_TEXTO)
 
-    def analisar(self, path, marcar=(), revarrer=False):
-        self.token += 1
-        tok = self.token
-        self.marcar = set(marcar)
-        self.pronto = False
+    def _limpar_painel(self, path):
+        """Zera o painel da direita e passa a mostrar o caminho informado."""
         self.endereco.set(path)
         self.nome.config(text=os.path.basename(path) or path)
         self.caminho.config(text=path)
-        self.uso.config(text="Calculando...")
-        self.status.config(text="Calculando... (a primeira leitura de pastas grandes pode demorar)",
-                           fg=COR_TEXTO)
         self.pct = None
         self.desenhar_barra(self.barra, None)
         self.pct_sel = None
@@ -412,6 +438,30 @@ class App:
         self.tab.delete(*self.tab.get_children())
         self.linhas.clear()
         self.ids, self.lista, self.sel_idx = [], [], set()
+        self.total = 0
+
+    def mostrar_sem_analise(self, path):
+        """Abre parado na raiz escolhida, sem varrer o disco (ver
+        deve_analisar_na_abertura)."""
+        self.pronto = False
+        self._limpar_painel(path)
+        self.uso.config(text="")
+        self.lbl_cache.config(text=formatar_status_cache(None, None, False), fg="#666666")
+        self.status.config(
+            text='Selecione uma pasta na árvore, ou use "Atualizar cache" ou '
+                 '"Mapear discos" para medir.',
+            fg=COR_TEXTO,
+        )
+
+    def analisar(self, path, marcar=(), revarrer=False):
+        self.token += 1
+        tok = self.token
+        self.marcar = set(marcar)
+        self.pronto = False
+        self._limpar_painel(path)
+        self.uso.config(text="Calculando...")
+        self.status.config(text="Calculando... (a primeira leitura de pastas grandes pode demorar)",
+                           fg=COR_TEXTO)
         threading.Thread(target=self.trabalho,
                          args=(path, tok, self.marcar, revarrer), daemon=True).start()
 

@@ -32,9 +32,9 @@ def main() -> None:
         return
 
     raizes = list_system_roots()
-    app = App(raizes[0], False)
-    app.definir_raizes(raizes)
-    app.rodar()
+    # as raizes vao no construtor: montar a arvore duas vezes dispararia duas
+    # analises em thread, e a primeira seguiria varrendo o disco em vao
+    App(raizes[0], False, raizes=raizes).rodar()
 
 
 if __name__ == "__main__":
