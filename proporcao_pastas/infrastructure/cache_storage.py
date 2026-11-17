@@ -212,6 +212,72 @@ class SqliteCacheStorage:
             ).fetchall()
         return [CachedFolder(**dict(linha)) for linha in linhas]
 
+    # ---------- atualizacao parcial ----------
+    def ancestrais(self, path: str) -> List[str]:
+        """Ancestrais em cache, do pai ate a raiz.
+
+        Guarda os caminhos ja visitados para nao entrar em loop infinito
+        se uma linha tiver parent autorreferente ou formar um ciclo
+        (mesmo hazard do delete_subtree, so que subindo em vez de descendo)."""
+        caminhos = []
+        with self._lock:
+            visitados = {path}
+            atual = path
+            while True:
+                linha = self._con.execute(
+                    "SELECT parent FROM folders WHERE path = ?", (atual,)
+                ).fetchone()
+                pai = linha["parent"] if linha else None
+                if not pai or pai in visitados:
+                    break
+                caminhos.append(pai)
+                visitados.add(pai)
+                atual = pai
+        return caminhos
+
+    def aplicar_delta(
+        self,
+        path: str,
+        d_tamanho: int,
+        d_arquivos: int,
+        d_subpastas: int,
+    ) -> List[str]:
+        """Soma as diferencas nos ancestrais e recalcula o maior arquivo deles.
+
+        cache_updated_at do ancestral nao muda: ele foi corrigido, nao revarrido."""
+        alterados = self.ancestrais(path)
+        with self._lock:
+            for ancestral in alterados:
+                self._con.execute(
+                    "UPDATE folders SET "
+                    "tamanho = MAX(0, tamanho + ?), "
+                    "arquivos = MAX(0, arquivos + ?), "
+                    "subpastas = MAX(0, subpastas + ?) "
+                    "WHERE path = ?",
+                    (d_tamanho, d_arquivos, d_subpastas, ancestral),
+                )
+            self._con.commit()
+        for ancestral in alterados:
+            self.recalcular_maior(ancestral)
+        return alterados
+
+    def recalcular_maior(self, path: str) -> None:
+        """Maior arquivo de uma pasta = maior entre os arquivos diretos dela
+        e o maior de cada subpasta direta que esta em cache."""
+        atual = self.get_folder(path)
+        if atual is None:
+            return
+        melhor_nome, melhor_tam = atual.maior_direct_nome, atual.maior_direct_tam
+        for sub in self.get_subfolders(path):
+            if sub.maior_tam > melhor_tam:
+                melhor_nome, melhor_tam = sub.maior_nome, sub.maior_tam
+        with self._lock:
+            self._con.execute(
+                "UPDATE folders SET maior_nome = ?, maior_tam = ? WHERE path = ?",
+                (melhor_nome, melhor_tam, path),
+            )
+            self._con.commit()
+
     def get_meta(self, chave: str) -> Optional[str]:
         with self._lock:
             linha = self._con.execute(
