@@ -390,16 +390,17 @@ class App:
 
     def poll(self):
         try:
-            while True:
-                self.status.config(text=self.fila_status.get_nowait(), fg=COR_TEXTO)
-        except queue.Empty:
-            pass
-        try:
-            while True:
-                self.mostrar(*self.fila.get_nowait())
-        except queue.Empty:
-            pass
-        finally:  # um erro em mostrar() nao pode parar as proximas atualizacoes
+            try:
+                while True:
+                    self.status.config(text=self.fila_status.get_nowait(), fg=COR_TEXTO)
+            except queue.Empty:
+                pass
+            try:
+                while True:
+                    self.mostrar(*self.fila.get_nowait())
+            except queue.Empty:
+                pass
+        finally:  # um erro em qualquer um dos dois drenos nao pode parar as proximas atualizacoes
             self.w.after(100, self.poll)
 
     # ---------- exibicao ----------
