@@ -109,3 +109,8 @@ class TestSqliteCacheStorage(unittest.TestCase):
         self.storage.close()
         self.storage = SqliteCacheStorage(caminho)
         self.assertEqual(self.storage.get_folder("/a").tamanho, 100)
+
+    def test_delete_subtree_com_parent_autorreferente_nao_trava(self):
+        self.storage.put_folder(pasta("/a", parent="/a"), [])
+        self.storage.delete_subtree("/a")
+        self.assertIsNone(self.storage.get_folder("/a"))

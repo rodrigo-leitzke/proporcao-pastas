@@ -155,16 +155,20 @@ class SqliteCacheStorage:
 
         Nao usa LIKE de proposito: nome de pasta com % ou _ seria curinga."""
         with self._lock:
-            alvos = [path]
+            visitados = set()
+            alvos = []
             fila = [path]
             while fila:
                 atual = fila.pop()
+                if atual in visitados:
+                    continue
+                visitados.add(atual)
+                alvos.append(atual)
                 filhos = [
                     linha["path"] for linha in self._con.execute(
                         "SELECT path FROM folders WHERE parent = ?", (atual,)
-                    )
+                    ) if linha["path"] not in visitados
                 ]
-                alvos.extend(filhos)
                 fila.extend(filhos)
             for inicio in range(0, len(alvos), 500):
                 lote = alvos[inicio:inicio + 500]
