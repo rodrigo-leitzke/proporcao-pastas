@@ -1,9 +1,14 @@
 """Testes do armazenamento do cache em SQLite."""
+import dataclasses
 import os
+import sqlite3
 import tempfile
 import unittest
 
 from proporcao_pastas.infrastructure.cache_storage import (
+    CAMPOS_FOLDER,
+    ESQUEMA,
+    VERSAO_ESQUEMA,
     CachedFile,
     CachedFolder,
     SqliteCacheStorage,
@@ -114,3 +119,78 @@ class TestSqliteCacheStorage(unittest.TestCase):
         self.storage.put_folder(pasta("/a", parent="/a"), [])
         self.storage.delete_subtree("/a")
         self.assertIsNone(self.storage.get_folder("/a"))
+
+    def test_campos_folder_batem_com_as_colunas_do_ddl(self):
+        colunas = [
+            linha[1] for linha in self.storage._con.execute("PRAGMA table_info(folders)")
+        ]
+        self.assertEqual(colunas, CAMPOS_FOLDER.split(", "))
+        self.assertEqual(len(colunas), len(dataclasses.fields(CachedFolder)))
+
+    def test_grava_a_versao_do_esquema(self):
+        self.assertEqual(self.storage.get_meta("versao"), VERSAO_ESQUEMA)
+
+
+class TestAberturaDeBancoProblematico(unittest.TestCase):
+    """Cache corrompido ou de outra versao nao pode impedir o programa de abrir."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.caminho = os.path.join(self.dir.name, "cache.db")
+
+    def tearDown(self):
+        self.dir.cleanup()
+
+    def test_arquivo_corrompido_e_refeito(self):
+        with open(self.caminho, "wb") as f:
+            f.write(b"isto nao e um banco de dados" * 50)
+        storage = SqliteCacheStorage(self.caminho)
+        try:
+            storage.put_folder(pasta("/a"), [])
+            self.assertEqual(storage.get_folder("/a").tamanho, 100)
+            self.assertEqual(storage.get_meta("versao"), VERSAO_ESQUEMA)
+        finally:
+            storage.close()
+
+    def test_esquema_antigo_e_refeito_em_vez_de_quebrar(self):
+        # 'folders' de uma versao anterior, sem a coluna arquivos e sem meta
+        con = sqlite3.connect(self.caminho)
+        con.execute("CREATE TABLE folders (path TEXT PRIMARY KEY, tamanho INTEGER)")
+        con.execute("INSERT INTO folders VALUES ('/antigo', 42)")
+        con.commit()
+        con.close()
+        storage = SqliteCacheStorage(self.caminho)
+        try:
+            self.assertIsNone(storage.get_folder("/antigo"))  # linha velha descartada
+            storage.put_folder(pasta("/a"), [])               # e o esquema novo funciona
+            self.assertEqual(storage.get_folder("/a").arquivos, 2)
+            self.assertEqual(storage.get_meta("versao"), VERSAO_ESQUEMA)
+        finally:
+            storage.close()
+
+    def test_versao_diferente_descarta_o_cache(self):
+        con = sqlite3.connect(self.caminho)
+        con.executescript(ESQUEMA)
+        con.execute("INSERT INTO meta (chave, valor) VALUES ('versao', '0')")
+        con.commit()
+        con.close()
+        primeiro = SqliteCacheStorage(self.caminho)
+        primeiro.put_folder(pasta("/a"), [])
+        primeiro.close()
+        # o put acima entrou no esquema recriado, com a versao atual
+        segundo = SqliteCacheStorage(self.caminho)
+        try:
+            self.assertEqual(segundo.get_meta("versao"), VERSAO_ESQUEMA)
+            self.assertEqual(segundo.get_folder("/a").tamanho, 100)
+        finally:
+            segundo.close()
+
+    def test_banco_na_mesma_versao_preserva_o_cache(self):
+        primeiro = SqliteCacheStorage(self.caminho)
+        primeiro.put_folder(pasta("/a"), [])
+        primeiro.close()
+        segundo = SqliteCacheStorage(self.caminho)
+        try:
+            self.assertEqual(segundo.get_folder("/a").tamanho, 100)
+        finally:
+            segundo.close()

@@ -17,6 +17,7 @@ import math
 import os
 import platform
 import queue
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -63,6 +64,18 @@ EXPLOSAO = 8  # quanto as fatias selecionadas saem do centro
 FIM_MAPEAMENTO = "\x00fim-mapeamento"
 
 
+def abrir_cache():
+    """Abre o cache em disco. Devolve (storage, aviso).
+
+    Se nem apagar e refazer o banco resolver, devolve storage None: o scanner
+    funciona sem cache (mede tudo na hora, como antes desta funcionalidade),
+    e abrir o programa sem cache e melhor que nao abrir."""
+    try:
+        return SqliteCacheStorage(caminho_padrao_cache()), ""
+    except (sqlite3.DatabaseError, OSError) as exc:
+        return None, f"Cache desativado: não foi possível abrir o banco ({exc})"
+
+
 def deve_analisar_na_abertura(raiz, storage) -> bool:
     """Diz se a pasta inicial pode ser analisada ja na abertura.
 
@@ -98,7 +111,11 @@ class App:
         self.raiz = raiz
         self.raizes = list(raizes) if raizes else [raiz]
         self.ignorar_selecao = None  # id da arvore cuja selecao automatica nao analisa
-        self.storage = storage if storage is not None else SqliteCacheStorage(caminho_padrao_cache())
+        self.aviso_cache = ""
+        if storage is not None:
+            self.storage = storage
+        else:
+            self.storage, self.aviso_cache = abrir_cache()
         self.scanner = FileSystemScanner(storage=self.storage)
         self.analyze_folder = AnalyzeFolder(self.scanner)
         self.token = 0
@@ -284,12 +301,15 @@ class App:
             )
         else:  # caminho passado na linha de comando: o usuario pediu essa pasta
             self.definir_raiz(raiz)
+        if self.aviso_cache:
+            self.status.config(text=self.aviso_cache, fg="#B00020")
         self.w.protocol("WM_DELETE_WINDOW", self.fechar)
         self.w.after(100, self.poll)
 
     def fechar(self):
         try:
-            self.storage.close()
+            if self.storage is not None:  # None quando o cache nao pudo ser aberto
+                self.storage.close()
         finally:
             self.w.destroy()
 
@@ -446,7 +466,10 @@ class App:
         self.pronto = False
         self._limpar_painel(path)
         self.uso.config(text="")
-        self.lbl_cache.config(text=formatar_status_cache(None, None, False), fg="#666666")
+        self.lbl_cache.config(
+            text=self.aviso_cache or formatar_status_cache(None, None, False),
+            fg="#B00020" if self.aviso_cache else "#666666",
+        )
         self.status.config(
             text='Selecione uma pasta na árvore, ou use "Atualizar cache" ou '
                  '"Mapear discos" para medir.',
@@ -502,10 +525,11 @@ class App:
         path, total, total_pai = analise.path, analise.total, analise.parent_total
         lista, folder_stats = analise.items, analise.folder_stats
         self.lbl_cache.config(
-            text=formatar_status_cache(
+            text=self.aviso_cache or formatar_status_cache(
                 analise.cache_updated_at, analise.global_cache_updated_at, analise.is_outdated
             ),
-            fg="#B06000" if analise.is_outdated else "#1A7F37",
+            fg="#B00020" if self.aviso_cache
+            else ("#B06000" if analise.is_outdated else "#1A7F37"),
         )
         self.lista, self.total, self.sel_idx = lista, total, set()
         resumo_pasta = f"{folder_stats.arquivos} arquivos, {folder_stats.subpastas} subpastas"

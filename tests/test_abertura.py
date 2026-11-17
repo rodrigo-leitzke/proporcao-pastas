@@ -6,11 +6,14 @@ deve_analisar_na_abertura justamente para poder ser testada sem janela.
 """
 import inspect
 import os
+import sqlite3
 import tempfile
 import unittest
+from unittest import mock
 
 from proporcao_pastas.infrastructure.cache_storage import SqliteCacheStorage
 from proporcao_pastas.infrastructure.file_system import FileSystemScanner
+from proporcao_pastas.presentation import tk_app
 from proporcao_pastas.presentation.tk_app import App, deve_analisar_na_abertura
 
 
@@ -41,6 +44,31 @@ class TestDeveAnalisarNaAbertura(unittest.TestCase):
         # garante que main() nao precisa chamar definir_raizes depois de abrir,
         # o que montaria a arvore (e dispararia a analise) duas vezes
         self.assertIn("raizes", inspect.signature(App.__init__).parameters)
+
+
+class TestAbrirCache(unittest.TestCase):
+    def test_cache_que_nao_abre_vira_aviso_e_storage_none(self):
+        def explode(_caminho):
+            raise sqlite3.DatabaseError("file is not a database")
+
+        with mock.patch.object(tk_app, "SqliteCacheStorage", explode):
+            storage, aviso = tk_app.abrir_cache()
+        self.assertIsNone(storage)
+        self.assertIn("Cache desativado", aviso)
+        # sem storage o scanner continua medindo na hora, e a App abre parada
+        self.assertFalse(deve_analisar_na_abertura("/qualquer", storage))
+        self.assertEqual(FileSystemScanner(storage=storage).ultima_atualizacao_global(), None)
+
+    def test_cache_que_abre_nao_tem_aviso(self):
+        with tempfile.TemporaryDirectory() as pasta:
+            caminho = os.path.join(pasta, "cache.db")
+            with mock.patch.object(tk_app, "caminho_padrao_cache", lambda: caminho):
+                storage, aviso = tk_app.abrir_cache()
+            try:
+                self.assertEqual(aviso, "")
+                self.assertIsNotNone(storage)
+            finally:
+                storage.close()
 
 
 class ArvoreFalsa:

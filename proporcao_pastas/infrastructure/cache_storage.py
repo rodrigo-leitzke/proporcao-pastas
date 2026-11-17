@@ -1,17 +1,17 @@
 """Cache persistente das estatisticas de pastas, em SQLite."""
+import dataclasses
 import os
-import platform
 import sqlite3
-import sys
 import threading
 from dataclasses import dataclass
 from typing import List, Optional
 
+from proporcao_pastas.infrastructure.system_roots import IS_MAC, IS_WINDOWS
+
 MAX_ARQUIVOS_CACHE = 50
 VERSAO_ESQUEMA = "1"
 
-IS_WINDOWS = platform.system() == "Windows" or os.name == "nt"
-IS_MAC = platform.system() == "Darwin" or sys.platform == "darwin"
+TABELAS = ("folders", "files", "meta")
 
 ESQUEMA = """
 CREATE TABLE IF NOT EXISTS folders (
@@ -47,13 +47,6 @@ CREATE TABLE IF NOT EXISTS meta (
 );
 """
 
-CAMPOS_FOLDER = (
-    "path, parent, tamanho, arquivos, subpastas, maior_nome, maior_tam, "
-    "maior_direct_nome, maior_direct_tam, modificado_em, criado_em, permissoes, "
-    "cache_updated_at, arquivos_truncados, soma_truncados"
-)
-
-
 @dataclass
 class CachedFolder:
     path: str
@@ -82,6 +75,12 @@ class CachedFile:
     permissoes: Optional[str]
 
 
+# colunas de folders na ordem dos campos do dataclass: o DDL e o dataclass sao
+# o par que sobra; o resto (SELECT, INSERT e as marcas do INSERT) sai daqui
+CAMPOS_FOLDER = ", ".join(campo.name for campo in dataclasses.fields(CachedFolder))
+MARCAS_FOLDER = ", ".join("?" * len(dataclasses.fields(CachedFolder)))
+
+
 def caminho_padrao_cache() -> str:
     """Caminho do banco de cache conforme o SO."""
     if IS_WINDOWS:
@@ -106,17 +105,74 @@ class SqliteCacheStorage:
         if pasta:
             os.makedirs(pasta, exist_ok=True)
         self._lock = threading.RLock()
-        self._con = sqlite3.connect(db_path, check_same_thread=False)
+        try:
+            self._abrir()
+        except (sqlite3.DatabaseError, OSError):
+            # arquivo corrompido, ou de outro programa: isto e cache, apagar e
+            # refazer e sempre valido. Se a segunda tentativa tambem falhar, o
+            # erro sobe e quem chamou decide (a App abre sem cache).
+            self._descartar_arquivo()
+            self._abrir()
+
+    def _abrir(self) -> None:
+        self._con = sqlite3.connect(self.db_path, check_same_thread=False)
         self._con.row_factory = sqlite3.Row
         with self._lock:
             self._con.execute("PRAGMA journal_mode=WAL")
             self._con.execute("PRAGMA synchronous=NORMAL")
+            # duas instancias ao mesmo tempo sao plausiveis (clique direito em
+            # duas pastas abre dois processos): esperar e melhor que travar
+            self._con.execute("PRAGMA busy_timeout=15000")
+            if self._esquema_incompativel():
+                self._descartar_esquema()
             self._con.executescript(ESQUEMA)
             self._con.execute(
                 "INSERT OR IGNORE INTO meta (chave, valor) VALUES ('versao', ?)",
                 (VERSAO_ESQUEMA,),
             )
             self._con.commit()
+
+    def _esquema_incompativel(self) -> bool:
+        """Diz se o arquivo tem um esquema de outra versao.
+
+        CREATE TABLE IF NOT EXISTS nao mexe em uma tabela 'folders' que exista
+        com outras colunas: sem esta checagem um banco de versao anterior abre
+        normalmente e so quebra depois, dentro de uma thread, com
+        'no such column'. Por isso meta.versao e lido antes de confiar no
+        arquivo."""
+        tabelas = {
+            linha["name"] for linha in self._con.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )
+        }
+        if "folders" not in tabelas:
+            return False  # banco novo ou vazio: nao ha nada a descartar
+        if "meta" not in tabelas:
+            return True
+        linha = self._con.execute(
+            "SELECT valor FROM meta WHERE chave = 'versao'"
+        ).fetchone()
+        return linha is None or linha["valor"] != VERSAO_ESQUEMA
+
+    def _descartar_esquema(self) -> None:
+        """Derruba as tabelas para o ESQUEMA ser recriado do zero."""
+        for tabela in TABELAS:
+            self._con.execute("DROP TABLE IF EXISTS {}".format(tabela))
+        self._con.commit()
+
+    def _descartar_arquivo(self) -> None:
+        """Fecha e apaga o banco (e os arquivos auxiliares do WAL)."""
+        con = getattr(self, "_con", None)
+        if con is not None:
+            try:
+                con.close()
+            except sqlite3.Error:
+                pass
+        for sufixo in ("", "-wal", "-shm", "-journal"):
+            try:
+                os.remove(self.db_path + sufixo)
+            except OSError:
+                pass
 
     def close(self) -> None:
         with self._lock:
@@ -127,16 +183,9 @@ class SqliteCacheStorage:
         with self._lock:
             self._con.execute(
                 "INSERT OR REPLACE INTO folders ({}) VALUES ({})".format(
-                    CAMPOS_FOLDER, ", ".join("?" * 15)
+                    CAMPOS_FOLDER, MARCAS_FOLDER
                 ),
-                (
-                    folder.path, folder.parent, folder.tamanho, folder.arquivos,
-                    folder.subpastas, folder.maior_nome, folder.maior_tam,
-                    folder.maior_direct_nome, folder.maior_direct_tam,
-                    folder.modificado_em, folder.criado_em, folder.permissoes,
-                    folder.cache_updated_at, folder.arquivos_truncados,
-                    folder.soma_truncados,
-                ),
+                dataclasses.astuple(folder),
             )
             self._con.execute("DELETE FROM files WHERE parent = ?", (folder.path,))
             self._con.executemany(
