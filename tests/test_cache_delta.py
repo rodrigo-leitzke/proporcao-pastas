@@ -3,11 +3,7 @@ import os
 import tempfile
 import unittest
 
-from proporcao_pastas.infrastructure.cache_storage import (
-    CachedFile,
-    CachedFolder,
-    SqliteCacheStorage,
-)
+from proporcao_pastas.infrastructure.cache_storage import CachedFolder, SqliteCacheStorage
 
 
 def pasta(path, parent, tamanho, arquivos=1, subpastas=0,
