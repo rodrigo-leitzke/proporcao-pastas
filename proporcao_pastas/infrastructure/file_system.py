@@ -193,12 +193,15 @@ class FileSystemScanner:
         if progresso:
             progresso(path)
         if antigo is not None:
-            self._storage.aplicar_delta(
+            ancestrais_corrigidos = self._storage.aplicar_delta(
                 path,
                 novo.tamanho - antigo.tamanho,
                 novo.arquivos - antigo.arquivos,
                 novo.subpastas - antigo.subpastas,
             )
+            with self._lock:
+                for ancestral in ancestrais_corrigidos:
+                    self._stats_cache.pop(ancestral, None)
         return novo
 
     # ---------- conteudo ----------

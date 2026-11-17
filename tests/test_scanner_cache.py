@@ -122,3 +122,22 @@ class TestScannerComCache(unittest.TestCase):
         vistos = []
         self.scanner.refresh_folder(self.raiz, progresso=vistos.append)
         self.assertTrue(vistos)
+
+    def test_refresh_folder_atualiza_ancestral_ja_em_cache_de_memoria(self):
+        # popula o cache em memoria do ancestral ANTES do refresh
+        self.scanner.stats(self.raiz)
+        sub = os.path.join(self.raiz, "sub")
+        escrever(os.path.join(sub, "c.bin"), b"w" * 25)
+        self.scanner.refresh_folder(sub)
+        # mesma instancia de scanner: nao pode devolver o total antigo do cache em memoria
+        self.assertEqual(self.scanner.stats(self.raiz).tamanho, 175)
+
+    def test_refresh_folder_corrige_maior_arquivo_do_ancestral_ja_em_cache(self):
+        sub = os.path.join(self.raiz, "sub")
+        escrever(os.path.join(sub, "enorme.bin"), b"g" * 5000)
+        # popula o cache em memoria do ancestral com "enorme.bin" como maior
+        self.assertEqual(self.scanner.stats(self.raiz).maior_arquivo_nome, "enorme.bin")
+        os.remove(os.path.join(sub, "enorme.bin"))
+        self.scanner.refresh_folder(sub)
+        # mesma instancia de scanner: o maior arquivo em cache tem que ser corrigido
+        self.assertEqual(self.scanner.stats(self.raiz).maior_arquivo_nome, "a.bin")
