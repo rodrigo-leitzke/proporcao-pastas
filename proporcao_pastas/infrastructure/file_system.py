@@ -204,6 +204,31 @@ class FileSystemScanner:
                     self._stats_cache.pop(ancestral, None)
         return novo
 
+    def mapear_raizes(self, raizes: List[str], progresso=None, cancelado=None) -> int:
+        """Varre as raizes inteiras, uma pasta de primeiro nivel por vez.
+
+        Varredura completa e cara: so deve ser chamada por acao explicita do
+        usuario, em thread separada, com progresso e cancelamento."""
+        alvos = []
+        for raiz in raizes:
+            alvos.extend(os.path.join(raiz, nome) for nome in self.subfolders(raiz))
+        total = len(alvos)
+        feitos = 0
+        for alvo in alvos:
+            if cancelado and cancelado():
+                break
+            self.stats(alvo, usar_cache=False)
+            feitos += 1
+            if progresso:
+                progresso(alvo, feitos, total)
+        for raiz in raizes:
+            if cancelado and cancelado():
+                break
+            # _varrer com usar_cache=True: le as entradas da raiz de novo, mas
+            # reaproveita as subpastas ja medidas acima em vez de revarrer tudo.
+            self._varrer(raiz, True)
+        return feitos
+
     # ---------- conteudo ----------
     def children(self, path: str, keep: Iterable[str] = (), max_items: int = 8) -> List[ItemPasta]:
         self.stats(path)  # garante que a pasta esta medida e em cache

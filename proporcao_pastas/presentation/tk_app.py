@@ -58,6 +58,10 @@ RAIO = 132
 RAIO_FURO = 65
 EXPLOSAO = 8  # quanto as fatias selecionadas saem do centro
 
+# sentinela colocada na fila_status pela thread de mapeamento ao terminar;
+# poll (thread principal) reconhece e restaura o botao, sem imprimir na barra
+FIM_MAPEAMENTO = "\x00fim-mapeamento"
+
 # ---------------------------------------------------------------- icones
 def icone_pasta(master):
     """Pasta amarela 16x16 desenhada pixel a pixel (sem arquivos externos)."""
@@ -96,6 +100,7 @@ class App:
         self.marcar = set()      # nomes a pre-selecionar na tabela (multi-selecao na arvore)
         self.fila = queue.Queue()
         self.fila_status = queue.Queue()
+        self.cancelar_mapeamento = False
 
         self.w = master if master is not None else tk.Tk()
         self.w.deiconify()
@@ -150,6 +155,9 @@ class App:
             side="left", fill="x", expand=True, padx=6)
         ttk.Button(barra, text="Atualizar cache", command=self.atualizar_cache).pack(
             side="left", padx=2)
+        self.btn_mapear = ttk.Button(barra, text="Mapear discos",
+                                     command=self.mapear_discos)
+        self.btn_mapear.pack(side="left", padx=2)
         ttk.Button(barra, text="Trocar pasta...", command=self.trocar).pack(side="left", padx=2)
         ttk.Button(barra, text=f"Abrir no {NOME_GERENCIADOR}", command=self.abrir_explorer).pack(side="left", padx=2)
 
@@ -319,6 +327,27 @@ class App:
         if sel and sel[0] in self.nos:
             self.analisar(self.nos[sel[0]], revarrer=True)
 
+    def mapear_discos(self):
+        """Varredura completa das raizes, em thread, com progresso na barra."""
+        if self.btn_mapear["text"] == "Cancelar mapeamento":
+            self.cancelar_mapeamento = True
+            return
+        self.cancelar_mapeamento = False
+        self.btn_mapear.config(text="Cancelar mapeamento")
+        threading.Thread(target=self._mapear, daemon=True).start()
+
+    def _mapear(self):
+        """Roda em thread separada: so toca a fila_status, nunca o Tk direto."""
+        def progresso(caminho, feitos, total):
+            self.fila_status.put(f"Mapeando {feitos}/{total}: {caminho}")
+
+        self.scanner.mapear_raizes(
+            self.raizes, progresso=progresso, cancelado=lambda: self.cancelar_mapeamento
+        )
+        self.fila_status.put("Mapeamento concluído" if not self.cancelar_mapeamento
+                             else "Mapeamento cancelado")
+        self.fila_status.put(FIM_MAPEAMENTO)
+
     def abrir_explorer(self):
         sel = self.tree.selection()
         if not sel or sel[0] not in self.nos:
@@ -401,7 +430,11 @@ class App:
         try:
             try:
                 while True:
-                    self.status.config(text=self.fila_status.get_nowait(), fg=COR_TEXTO)
+                    msg = self.fila_status.get_nowait()
+                    if msg == FIM_MAPEAMENTO:
+                        self.btn_mapear.config(text="Mapear discos")
+                        continue
+                    self.status.config(text=msg, fg=COR_TEXTO)
             except queue.Empty:
                 pass
             try:
