@@ -110,7 +110,10 @@ def deve_analisar_na_abertura(raiz, storage) -> bool:
     onde a leitura e instantanea. Sem cache, o programa abre parado."""
     if storage is None:
         return False
-    return storage.get_folder(raiz) is not None
+    try:
+        return storage.get_folder(raiz) is not None
+    except sqlite3.DatabaseError:
+        return False  # problema no cache nao pode impedir a janela de abrir
 
 
 # ---------------------------------------------------------------- icones
