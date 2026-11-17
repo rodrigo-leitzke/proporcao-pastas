@@ -36,6 +36,7 @@ from proporcao_pastas.domain.formatting import (
 )
 from proporcao_pastas.infrastructure.cache_storage import SqliteCacheStorage, caminho_padrao_cache
 from proporcao_pastas.infrastructure.file_system import FileSystemScanner, raiz_de
+from proporcao_pastas.infrastructure.system_roots import list_system_roots
 
 SISTEMA = platform.system()
 IS_MAC = SISTEMA == "Darwin" or sys.platform == "darwin"
@@ -62,6 +63,30 @@ EXPLOSAO = 8  # quanto as fatias selecionadas saem do centro
 # sentinela colocada na fila_status pela thread de mapeamento ao terminar;
 # poll (thread principal) reconhece e restaura o botao, sem imprimir na barra
 FIM_MAPEAMENTO = "\x00fim-mapeamento"
+# mensagens de falha vao pela mesma fila_status; o prefixo diz ao poll que a
+# linha e um erro e deve sair em vermelho
+PREFIXO_ERRO = "Erro: "
+
+# colunas da tabela de detalhes, na ordem em que valores_da_linha as monta
+COLUNAS_TABELA = ("tam", "pct", "tipo", "itens", "maior",
+                  "modificado", "criado", "perm", "cache")
+
+
+def valores_da_linha(item, pct):
+    """Valores de uma linha da tabela, na ordem de COLUNAS_TABELA."""
+    nome, tamanho, eh_pasta = item[0], item[1], item[2]
+    return (
+        fmt(tamanho),
+        f"{pct:.1f}%",
+        getattr(item, "tipo_detalhado", None) or formatar_tipo_item(nome, eh_pasta),
+        formatar_contagem(eh_pasta, getattr(item, "arquivos", 0),
+                          getattr(item, "subpastas", 0)),
+        getattr(item, "maior_arquivo", "—"),
+        formatar_data(getattr(item, "modificado_em", None)),
+        formatar_data(getattr(item, "criado_em", None)),
+        getattr(item, "permissoes", "—"),
+        formatar_data(getattr(item, "cache_updated_at", None), segundos=True),
+    )
 
 
 def abrir_cache():
@@ -251,8 +276,7 @@ class App:
         tab_frame = tk.Frame(self.corpo, bg="white")
         tab_frame.pack(side="left", fill="both", expand=True, padx=(12, 0))
 
-        colunas = ("tam", "pct", "tipo", "itens", "maior", "modificado", "criado", "perm", "cache")
-        self.tab = ttk.Treeview(tab_frame, columns=colunas, height=10,
+        self.tab = ttk.Treeview(tab_frame, columns=COLUNAS_TABELA, height=10,
                                 selectmode="extended")
         self.tab.heading("#0", text="Nome", anchor="w")
         self.tab.heading("tam", text="Tamanho", anchor="e")
@@ -313,17 +337,30 @@ class App:
         finally:
             self.w.destroy()
 
-    def erro(self, exc, val, tb):
-        """Erros de callbacks: mostra na barra de status e grava em um .log
-        (com pythonw nao existe console, entao falhas ficariam invisiveis)."""
-        msg = "".join(traceback.format_exception(exc, val, tb))
+    def gravar_log(self, msg):
+        """Acrescenta o texto ao .log ao lado do codigo. Com pythonw nao existe
+        console, entao sem isto uma falha nao deixaria rastro nenhum."""
         try:
             log = os.path.join(os.path.dirname(os.path.abspath(__file__)), "proporcao_pastas.log")
             with open(log, "a", encoding="utf-8") as f:
                 f.write(msg + "\n")
         except OSError:
             pass
-        self.status.config(text=f"Erro: {val}  (detalhes em proporcao_pastas.log)", fg="#B00020")
+
+    def erro(self, exc, val, tb):
+        """Erros de callbacks do Tk: mostra na barra de status e grava no .log."""
+        self.gravar_log("".join(traceback.format_exception(exc, val, tb)))
+        self.status.config(text=f"{PREFIXO_ERRO}{val}  (detalhes em proporcao_pastas.log)",
+                           fg="#B00020")
+
+    def falha_em_thread(self, exc):
+        """Erros de thread: report_callback_exception so cobre callback do Tk.
+
+        Sem isto a fila nunca recebe nada, o poll segue rodando e a tela fica em
+        'Calculando...' para sempre, com o traceback indo para um stderr que,
+        com pythonw, nao existe. So pode tocar as filas, nunca o Tk."""
+        self.gravar_log(traceback.format_exc())
+        self.fila_status.put(f"{PREFIXO_ERRO}{exc}  (detalhes em proporcao_pastas.log)")
 
     # ---------- arvore de pastas ----------
     def inserir(self, pai_id, caminho, texto):
@@ -389,12 +426,19 @@ class App:
         def progresso(caminho, feitos, total):
             self.fila_status.put(f"Mapeando {feitos}/{total}: {caminho}")
 
-        self.scanner.mapear_raizes(
-            self.raizes, progresso=progresso, cancelado=lambda: self.cancelar_mapeamento
-        )
-        self.fila_status.put("Mapeamento concluído" if not self.cancelar_mapeamento
-                             else "Mapeamento cancelado")
-        self.fila_status.put(FIM_MAPEAMENTO)
+        try:
+            # le as raizes do sistema de novo: trocar() reduz self.raizes a uma
+            # pasta so, e o botao promete mapear os discos
+            self.scanner.mapear_raizes(
+                list_system_roots(), progresso=progresso,
+                cancelado=lambda: self.cancelar_mapeamento,
+            )
+            self.fila_status.put("Mapeamento concluído" if not self.cancelar_mapeamento
+                                 else "Mapeamento cancelado")
+        except Exception as exc:
+            self.falha_em_thread(exc)
+        finally:  # sem isto o botao ficaria preso em "Cancelar mapeamento"
+            self.fila_status.put(FIM_MAPEAMENTO)
 
     def abrir_explorer(self):
         sel = self.tree.selection()
@@ -489,15 +533,18 @@ class App:
                          args=(path, tok, self.marcar, revarrer), daemon=True).start()
 
     def trabalho(self, path, tok, marcar, revarrer=False):
-        raiz = raiz_de(path, self.raizes)
-        if revarrer:
-            resultado = self.analyze_folder.refresh(
-                path, raiz, self.pai_na_raiz, marcar,
-                progresso=lambda p: self.fila_status.put(f"Revarrendo {p}..."),
-            )
-        else:
-            resultado = self.analyze_folder.execute(path, raiz, self.pai_na_raiz, marcar)
-        self.fila.put((resultado, tok))
+        try:
+            raiz = raiz_de(path, self.raizes)
+            if revarrer:
+                resultado = self.analyze_folder.refresh(
+                    path, raiz, self.pai_na_raiz, marcar,
+                    progresso=lambda p: self.fila_status.put(f"Revarrendo {p}..."),
+                )
+            else:
+                resultado = self.analyze_folder.execute(path, raiz, self.pai_na_raiz, marcar)
+            self.fila.put((resultado, tok))
+        except Exception as exc:  # sem isto a tela ficaria em "Calculando..."
+            self.falha_em_thread(exc)
 
     def poll(self):
         try:
@@ -507,7 +554,10 @@ class App:
                     if msg == FIM_MAPEAMENTO:
                         self.btn_mapear.config(text="Mapear discos")
                         continue
-                    self.status.config(text=msg, fg=COR_TEXTO)
+                    self.status.config(
+                        text=msg,
+                        fg="#B00020" if msg.startswith(PREFIXO_ERRO) else COR_TEXTO,
+                    )
             except queue.Empty:
                 pass
             try:
@@ -561,32 +611,12 @@ class App:
         for i, item in enumerate(lista):
             nome, s, eh_pasta = item[0], item[1], item[2]
             cor = CINZA if eh_pasta is None else CORES[i % len(CORES)]
-            tipo = getattr(item, "tipo_detalhado", None) or formatar_tipo_item(nome, eh_pasta)
-            arquivos = getattr(item, "arquivos", 0)
-            subpastas = getattr(item, "subpastas", 0)
-            conteudo = formatar_contagem(eh_pasta, arquivos, subpastas)
-            maior = getattr(item, "maior_arquivo", "—")
-            modificado = formatar_data(getattr(item, "modificado_em", None))
-            criado = formatar_data(getattr(item, "criado_em", None))
-            perm = getattr(item, "permissoes", "—")
-            cache_em = formatar_data(getattr(item, "cache_updated_at", None), segundos=True)
-
             iid = self.tab.insert(
                 "",
                 "end",
                 text=nome,
                 image=self.quadrados[cor],
-                values=(
-                    fmt(s),
-                    f"{s / soma * 100:.1f}%",
-                    tipo,
-                    conteudo,
-                    maior,
-                    modificado,
-                    criado,
-                    perm,
-                    cache_em,
-                ),
+                values=valores_da_linha(item, s / soma * 100),
             )
             self.ids.append(iid)
             if eh_pasta:
