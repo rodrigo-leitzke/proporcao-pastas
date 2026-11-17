@@ -1,6 +1,7 @@
 """Testes da integracao entre o scanner e o cache persistente."""
 import os
 import tempfile
+import threading
 import time
 import unittest
 
@@ -151,6 +152,57 @@ class TestScannerComCache(unittest.TestCase):
         self.scanner.refresh_folder(sub)
         # mesma instancia de scanner: nao pode devolver o total antigo do cache em memoria
         self.assertEqual(self.scanner.stats(self.raiz).tamanho, 175)
+
+    def test_pasta_ilegivel_nao_e_gravada_no_cache(self):
+        travada = os.path.join(self.raiz, "travada")
+        escrever(os.path.join(travada, "x.bin"), b"x" * 10)
+        os.chmod(travada, 0o000)
+        if os.access(travada, os.R_OK):  # root (ou Windows) ignora o chmod
+            os.chmod(travada, 0o755)
+            self.skipTest("o chmod nao nega a leitura neste ambiente")
+        try:
+            self.assertEqual(self.scanner.stats(self.raiz).tamanho, 150)
+        finally:
+            os.chmod(travada, 0o755)
+        # o 0 da pasta ilegivel nao pode ficar gravado por 7 dias
+        self.assertIsNone(self.storage.get_folder(travada))
+        self.assertEqual(self.storage.get_folder(self.raiz).tamanho, 150)
+        # quando a leitura volta, a pasta e gravada normalmente
+        outro = FileSystemScanner(storage=self.storage)
+        self.assertEqual(outro.stats(travada).tamanho, 10)
+        self.assertEqual(self.storage.get_folder(travada).tamanho, 10)
+
+    def test_refresh_nao_duplica_delta_com_varredura_concorrente(self):
+        """A varredura e o refresh sao serializados pelo scanner.
+
+        Sem isso, uma varredura abandonada do ancestral (o usuario clicou em
+        outra pasta) grava no meio do refresh e o delta acaba somado em cima de
+        um total que ja estava corrigido."""
+        self.scanner.stats(self.raiz)  # raiz = 150 em cache
+        sub = os.path.join(self.raiz, "sub")
+        escrever(os.path.join(sub, "c.bin"), b"w" * 25)  # sub vai de 50 para 75
+        original = self.storage.aplicar_delta
+        concorrentes = []
+
+        def aplicar_delta(*args, **kwargs):
+            # no meio da correcao, outra thread tenta varrer o ancestral
+            thread = threading.Thread(
+                target=lambda: self.scanner.stats(self.raiz, usar_cache=False)
+            )
+            concorrentes.append(thread)
+            thread.start()
+            time.sleep(0.05)
+            return original(*args, **kwargs)
+
+        self.storage.aplicar_delta = aplicar_delta
+        try:
+            self.scanner.refresh_folder(sub)
+        finally:
+            del self.storage.aplicar_delta
+        for thread in concorrentes:
+            thread.join(timeout=5)
+            self.assertFalse(thread.is_alive())
+        self.assertEqual(self.storage.get_folder(self.raiz).tamanho, 175)
 
     def test_refresh_folder_corrige_maior_arquivo_do_ancestral_ja_em_cache(self):
         sub = os.path.join(self.raiz, "sub")

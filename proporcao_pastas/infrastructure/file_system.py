@@ -15,6 +15,9 @@ from proporcao_pastas.infrastructure.cache_storage import (
 from proporcao_pastas.infrastructure.system_roots import caminho_ignorado
 
 IDADE_MAXIMA_CACHE_SEG = 7 * 24 * 3600
+# a cada quantas pastas medidas a varredura total avisa o progresso: uma a uma
+# encheria a fila da interface com milhoes de mensagens que ninguem le
+PASTAS_POR_AVISO = 200
 
 
 def _maior_str(nome: str, tamanho: int) -> str:
@@ -30,6 +33,17 @@ class FileSystemScanner:
         self._storage = storage
         self._idade_maxima = idade_maxima
         self._lock = threading.RLock()
+        # Serializa a varredura: uma analise ou um refresh por vez. A interface
+        # cria uma thread por clique e nao cancela a anterior; sem isto uma
+        # thread abandonada pode gravar por cima da correcao do refresh_folder
+        # (perdendo o delta) ou antes dela (aplicando o delta duas vezes), e o
+        # numero errado fica no banco. RLock, e nao Lock, porque refresh_folder
+        # segura este lock e chama stats() dentro dele, e porque a recursao de
+        # _varrer volta a pedi-lo na mesma thread.
+        # Ordem dos locks: este e sempre o mais externo. Nada pede ele estando
+        # com self._lock (cache em memoria) nem com o lock do storage, entao nao
+        # ha como dois deles se cruzarem.
+        self._lock_varredura = threading.RLock()
 
     def clear_cache(self) -> None:
         with self._lock:
@@ -40,40 +54,67 @@ class FileSystemScanner:
 
     # ---------- estatisticas ----------
     def stats(self, path: str, usar_cache: bool = True) -> FolderStats:
-        if usar_cache:
-            with self._lock:
-                if path in self._stats_cache:
-                    return self._stats_cache[path]
-            if self._storage is not None:
-                linha = self._storage.get_folder(path)
-                if linha is not None:
-                    resultado = FolderStats(
-                        tamanho=linha.tamanho,
-                        arquivos=linha.arquivos,
-                        subpastas=linha.subpastas,
-                        maior_arquivo_nome=linha.maior_nome,
-                        maior_arquivo_tam=linha.maior_tam,
-                        cache_updated_at=linha.cache_updated_at,
-                    )
-                    with self._lock:
-                        self._stats_cache[path] = resultado
-                    return resultado
-        return self._varrer(path, usar_cache)
+        return self._medir(path, usar_cache)[0]
 
-    def _varrer(self, path: str, usar_cache: bool) -> FolderStats:
+    def _do_cache(self, path: str) -> Optional[FolderStats]:
+        """Le a pasta do cache em memoria ou do banco; None se nao estiver."""
+        with self._lock:
+            if path in self._stats_cache:
+                return self._stats_cache[path]
+        if self._storage is None:
+            return None
+        linha = self._storage.get_folder(path)
+        if linha is None:
+            return None
+        resultado = FolderStats(
+            tamanho=linha.tamanho,
+            arquivos=linha.arquivos,
+            subpastas=linha.subpastas,
+            maior_arquivo_nome=linha.maior_nome,
+            maior_arquivo_tam=linha.maior_tam,
+            cache_updated_at=linha.cache_updated_at,
+        )
+        with self._lock:
+            self._stats_cache[path] = resultado
+        return resultado
+
+    def _medir(self, path: str, usar_cache: bool,
+               cancelado=None, progresso=None) -> Tuple[FolderStats, bool]:
+        """Mede a pasta e diz se a varredura foi interrompida no meio.
+
+        O bool nao entra em FolderStats porque e detalhe da varredura, nao do
+        dominio: serve para nao gravar um total truncado."""
+        if usar_cache:
+            pronto = self._do_cache(path)
+            if pronto is not None:
+                return pronto, False  # acerto de cache: nem pega o lock
+        with self._lock_varredura:
+            return self._varrer(path, usar_cache, cancelado, progresso)
+
+    def _varrer(self, path: str, usar_cache: bool,
+                cancelado=None, progresso=None) -> Tuple[FolderStats, bool]:
+        """Mede a pasta lendo o disco. Precisa ser chamada com _lock_varredura."""
         total = arquivos = subpastas = 0
         maior_nome, maior_tam = "", 0
         maior_direto_nome, maior_direto_tam = "", 0
         diretos: List[CachedFile] = []
+        listou = True        # False se o os.scandir da propria pasta falhou
+        interrompida = False  # True se o cancelamento chegou aqui ou abaixo
 
         try:
             with os.scandir(path) as entries:
                 for entry in entries:
+                    if cancelado is not None and cancelado():
+                        interrompida = True
+                        break
                     try:
                         if entry.is_symlink() or caminho_ignorado(entry.path):
                             continue
                         if entry.is_dir(follow_symlinks=False):
-                            sub = self.stats(entry.path, usar_cache)
+                            sub, sub_interrompida = self._medir(
+                                entry.path, usar_cache, cancelado, progresso
+                            )
+                            interrompida = interrompida or sub_interrompida
                             total += sub.tamanho
                             arquivos += sub.arquivos
                             subpastas += 1 + sub.subpastas
@@ -98,7 +139,12 @@ class FileSystemScanner:
                     except OSError:
                         continue
         except OSError:
-            pass
+            # Falha ao listar a pasta: ela conta como 0, como sempre contou,
+            # mas esse 0 nao vai para o banco. A falha costuma ser passageira
+            # (unidade removivel fora do ar, antivirus, ACL) e o os.stat ainda
+            # funciona, entao o 0 gravado ficaria com modificado_em valido e o
+            # is_folder_outdated nunca marcaria a linha: o 0 duraria 7 dias.
+            listou = False
 
         agora = time.time()
         resultado = FolderStats(
@@ -109,11 +155,17 @@ class FileSystemScanner:
             maior_arquivo_tam=maior_tam,
             cache_updated_at=agora,
         )
-        with self._lock:
-            self._stats_cache[path] = resultado
-        if self._storage is not None:
-            self._gravar(path, resultado, diretos, maior_direto_nome, maior_direto_tam, agora)
-        return resultado
+        if not interrompida:
+            # total truncado nao entra nem no cache em memoria: a interface
+            # mostraria o numero errado depois de um cancelamento
+            with self._lock:
+                self._stats_cache[path] = resultado
+            if self._storage is not None and listou:
+                self._gravar(path, resultado, diretos, maior_direto_nome,
+                             maior_direto_tam, agora)
+            if progresso is not None:
+                progresso(path)
+        return resultado, interrompida
 
     def _gravar(self, path, resultado, diretos, maior_direto_nome, maior_direto_tam, agora):
         diretos.sort(key=lambda a: -a.tamanho)
@@ -176,7 +228,15 @@ class FileSystemScanner:
         return False
 
     def refresh_folder(self, path: str, progresso=None) -> FolderStats:
-        """Revarre so esta subarvore e corrige os ancestrais pela diferenca."""
+        """Revarre so esta subarvore e corrige os ancestrais pela diferenca.
+
+        Tudo sob _lock_varredura: ler o total antigo, apagar a subarvore,
+        revarrer e somar o delta e uma sequencia que outra varredura no meio
+        estragaria (ver o comentario do lock no __init__)."""
+        with self._lock_varredura:
+            return self._refresh_folder(path, progresso)
+
+    def _refresh_folder(self, path: str, progresso=None) -> FolderStats:
         if progresso:
             progresso(path)
         if self._storage is None:
@@ -210,16 +270,27 @@ class FileSystemScanner:
         """Varre as raizes inteiras, uma pasta de primeiro nivel por vez.
 
         Varredura completa e cara: so deve ser chamada por acao explicita do
-        usuario, em thread separada, com progresso e cancelamento."""
+        usuario, em thread separada, com progresso e cancelamento. O
+        cancelamento desce ate dentro da recursao: uma pasta de primeiro nivel
+        pode levar muitos minutos, e esperar o fim dela nao seria cancelar."""
         alvos = []
         for raiz in raizes:
             alvos.extend(os.path.join(raiz, nome) for nome in self.subfolders(raiz))
         total = len(alvos)
         feitos = 0
+        medidas = [0]  # pastas medidas, so para espacar os avisos de progresso
+
+        def passo(caminho):
+            medidas[0] += 1
+            if progresso and medidas[0] % PASTAS_POR_AVISO == 0:
+                progresso(caminho, feitos, total)
+
         for alvo in alvos:
             if cancelado and cancelado():
                 break
-            self.stats(alvo, usar_cache=False)
+            _, interrompida = self._medir(alvo, False, cancelado, passo)
+            if interrompida:  # cancelado no meio: nao conta como alvo concluido
+                break
             feitos += 1
             if progresso:
                 progresso(alvo, feitos, total)
@@ -228,7 +299,10 @@ class FileSystemScanner:
                 break
             # _varrer com usar_cache=True: le as entradas da raiz de novo, mas
             # reaproveita as subpastas ja medidas acima em vez de revarrer tudo.
-            self._varrer(raiz, True)
+            # Direto no _varrer, e nao no _medir, para nao parar num acerto de
+            # cache da propria raiz e deixar o total dela velho.
+            with self._lock_varredura:
+                self._varrer(raiz, True, cancelado)
         return feitos
 
     # ---------- conteudo ----------
