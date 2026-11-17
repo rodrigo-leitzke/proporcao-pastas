@@ -14,6 +14,7 @@ Programa multiplataforma (Windows e macOS), feito em Python, que mostra quanto c
   - **Maior Arquivo** encontrado dentro de cada subpasta.
   - **Modificado em** e **Criado em** (datas de metadados do sistema de arquivos).
   - **Permissões** de acesso do Sistema Operacional (formato POSIX `drwxr-xr-x` / `-rw-r--r--`).
+  - **Cache atualizado em**: data e hora em que aquele item foi medido e guardado no cache.
 - Gráfico de pizza (rosca) com a divisão da pasta entre subpastas e arquivos; o excedente é agrupado em "Outros".
 - Soma de itens: selecione vários itens na tabela (`Ctrl` no Windows / `Cmd` no macOS ou `Shift` + clique), fatias da pizza ou várias pastas irmãs na árvore para ver quanto representam da pasta (exemplo: 2 arquivos de 100 MB em uma pasta de 300 MB = 200 MB de 300 MB, 66,7%).
 - Duplo clique em uma subpasta da tabela navega até ela.
@@ -40,7 +41,7 @@ python proporcao_pastas.py "C:\Users\seu_usuario\Documents"  # abre direto nessa
 
 No macOS:
 ```bash
-python3 proporcao_pastas.py                            # abre em modo multi-raiz
+python3 proporcao_pastas.py                            # abre sem pedir pasta inicial
 python3 proporcao_pastas.py "/Users/seu_usuario/Documents"  # abre direto nessa pasta
 ```
 
@@ -59,6 +60,10 @@ python proporcao_pastas.py --remover
 
 - O tamanho de cada pasta é calculado por recursão sobre a estrutura em árvore do sistema de arquivos (`os.scandir`).
 - O cálculo roda em uma thread separada, então a interface não trava em pastas grandes.
+- Ao abrir sem informar uma pasta, nenhum disco é varrido sozinho: a raiz só é
+  medida na abertura se já estiver em cache (leitura imediata). Sem cache, o
+  programa abre parado, esperando você escolher uma pasta na árvore, usar
+  "Atualizar cache" ou "Mapear discos" — varrer um disco inteiro leva minutos.
 - Links simbólicos são ignorados, para não contar o mesmo conteúdo duas vezes; pastas sem permissão de leitura contam como 0.
 - O cache fica em um banco SQLite (biblioteca padrão do Python), em
   `%LOCALAPPDATA%\ProporcaoPastas\cache.db` no Windows e
@@ -101,6 +106,10 @@ detalhe de como o sistema de arquivos é consultado.
 - Depois de "Atualizar cache" em uma subpasta, os totais das pastas pai são
   corrigidos pela diferença daquela subpasta; alterações feitas em pastas irmãs
   no mesmo período continuam invisíveis até que elas também sejam atualizadas.
+- O "Atualizar cache" apaga a subpasta do cache antes de medi-la de novo. Se o
+  programa for encerrado exatamente entre os dois passos, as pastas pai ficam
+  contando uma subárvore cujas linhas já não existem, e o total delas aparece
+  maior que o real; atualizar aquela subpasta de novo corrige.
 - O banco de cache guarda caminhos e nomes de arquivos em texto plano no
   diretório de cache do usuário.
 - O "Maior Arquivo" de uma pasta é o maior entre os arquivos dela e os das
