@@ -18,14 +18,30 @@ def clarear_cor(cor: str, fator: float = 0.65) -> str:
     return "#%02x%02x%02x" % tuple(int(c + (255 - c) * fator) for c in rgb)
 
 
-def formatar_data(timestamp: Optional[float]) -> str:
-    """Formata um timestamp POSIX em dd/mm/aaaa HH:MM."""
+def formatar_data(timestamp: Optional[float], segundos: bool = False) -> str:
+    """Formata um timestamp POSIX em dd/mm/aaaa HH:MM (ou HH:MM:SS)."""
     if not timestamp:
         return "—"
+    formato = "%d/%m/%Y %H:%M:%S" if segundos else "%d/%m/%Y %H:%M"
     try:
-        return datetime.fromtimestamp(timestamp).strftime("%d/%m/%Y %H:%M")
+        return datetime.fromtimestamp(timestamp).strftime(formato)
     except (OSError, OverflowError, ValueError):
         return "—"
+
+
+def formatar_status_cache(
+    cache_updated_at: Optional[float],
+    global_updated_at: Optional[float],
+    desatualizado: bool,
+) -> str:
+    """Monta o texto do rotulo de status do cache."""
+    if not cache_updated_at:
+        return "Pasta ainda não está em cache"
+    marca = "⚠️ Cache desatualizado" if desatualizado else "✅ Cache atualizado"
+    texto = f"{marca}, última vez atualizado: {formatar_data(cache_updated_at, segundos=True)}"
+    if global_updated_at:
+        texto += f" (Memória geral: {formatar_data(global_updated_at, segundos=True)})"
+    return texto
 
 
 def formatar_tipo_item(nome: str, eh_pasta: Optional[bool]) -> str:
