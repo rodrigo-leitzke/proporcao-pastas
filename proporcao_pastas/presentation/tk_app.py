@@ -29,9 +29,11 @@ from proporcao_pastas.domain.formatting import (
     clarear_cor as clarear,
     formatar_contagem,
     formatar_data,
+    formatar_status_cache,
     formatar_tamanho as fmt,
     formatar_tipo_item,
 )
+from proporcao_pastas.infrastructure.cache_storage import SqliteCacheStorage, caminho_padrao_cache
 from proporcao_pastas.infrastructure.file_system import FileSystemScanner
 
 SISTEMA = platform.system()
@@ -74,10 +76,11 @@ def quadrado(master, cor):
 
 # ---------------------------------------------------------------- interface
 class App:
-    def __init__(self, raiz, pai_na_raiz, master=None):
+    def __init__(self, raiz, pai_na_raiz, master=None, storage=None):
         self.pai_na_raiz = pai_na_raiz
         self.raiz = raiz
-        self.scanner = FileSystemScanner()
+        self.storage = storage if storage is not None else SqliteCacheStorage(caminho_padrao_cache())
+        self.scanner = FileSystemScanner(storage=self.storage)
         self.analyze_folder = AnalyzeFolder(self.scanner)
         self.token = 0
         self.pronto = False      # False enquanto a analise esta em andamento
@@ -92,6 +95,7 @@ class App:
         self.pct_sel = None      # % dos selecionados em relacao a pasta atual
         self.marcar = set()      # nomes a pre-selecionar na tabela (multi-selecao na arvore)
         self.fila = queue.Queue()
+        self.fila_status = queue.Queue()
 
         self.w = master if master is not None else tk.Tk()
         self.w.deiconify()
@@ -144,7 +148,8 @@ class App:
         self.endereco = tk.StringVar()
         ttk.Entry(barra, textvariable=self.endereco, state="readonly").pack(
             side="left", fill="x", expand=True, padx=6)
-        ttk.Button(barra, text="Atualizar", command=self.atualizar).pack(side="left", padx=2)
+        ttk.Button(barra, text="Atualizar cache", command=self.atualizar_cache).pack(
+            side="left", padx=2)
         ttk.Button(barra, text="Trocar pasta...", command=self.trocar).pack(side="left", padx=2)
         ttk.Button(barra, text=f"Abrir no {NOME_GERENCIADOR}", command=self.abrir_explorer).pack(side="left", padx=2)
 
@@ -174,6 +179,9 @@ class App:
         self.caminho = tk.Label(txt, bg="white", fg="#666666", font=(FONTE_PADRAO, 9),
                                 anchor="w", justify="left", wraplength=700)
         self.caminho.pack(fill="x")
+        self.lbl_cache = tk.Label(txt, bg="white", fg="#666666", font=("Segoe UI", 9, "bold"),
+                                  anchor="w", justify="left", wraplength=700, text="")
+        self.lbl_cache.pack(fill="x")
 
         # uso da pasta atual em relacao a pasta pai
         self.uso = tk.Label(dir_, bg="white", fg=COR_TEXTO, font=(FONTE_PADRAO, 10), anchor="w")
@@ -203,7 +211,7 @@ class App:
         tab_frame = tk.Frame(self.corpo, bg="white")
         tab_frame.pack(side="left", fill="both", expand=True, padx=(12, 0))
 
-        colunas = ("tam", "pct", "tipo", "itens", "maior", "modificado", "criado", "perm")
+        colunas = ("tam", "pct", "tipo", "itens", "maior", "modificado", "criado", "perm", "cache")
         self.tab = ttk.Treeview(tab_frame, columns=colunas, height=10,
                                 selectmode="extended")
         self.tab.heading("#0", text="Nome", anchor="w")
@@ -215,16 +223,18 @@ class App:
         self.tab.heading("modificado", text="Modificado em", anchor="center")
         self.tab.heading("criado", text="Criado em", anchor="center")
         self.tab.heading("perm", text="Permissões", anchor="center")
+        self.tab.heading("cache", text="Cache atualizado em", anchor="center")
 
         self.tab.column("#0", width=180, minwidth=130, stretch=True)
         self.tab.column("tam", width=85, anchor="e", stretch=False)
         self.tab.column("pct", width=55, anchor="e", stretch=False)
         self.tab.column("tipo", width=95, anchor="w", stretch=False)
         self.tab.column("itens", width=105, anchor="w", stretch=False)
-        self.tab.column("maior", width=150, minwidth=110, anchor="w", stretch=True)
+        self.tab.column("maior", width=130, minwidth=100, anchor="w", stretch=True)
         self.tab.column("modificado", width=115, anchor="center", stretch=False)
         self.tab.column("criado", width=115, anchor="center", stretch=False)
         self.tab.column("perm", width=85, anchor="center", stretch=False)
+        self.tab.column("cache", width=125, anchor="center", stretch=False)
 
         sb_tab_y = ttk.Scrollbar(tab_frame, orient="vertical", command=self.tab.yview)
         sb_tab_x = ttk.Scrollbar(tab_frame, orient="horizontal", command=self.tab.xview)
@@ -244,7 +254,14 @@ class App:
         self.tree.bind("<<TreeviewSelect>>", self.selecionar)
 
         self.definir_raiz(raiz)
+        self.w.protocol("WM_DELETE_WINDOW", self.fechar)
         self.w.after(100, self.poll)
+
+    def fechar(self):
+        try:
+            self.storage.close()
+        finally:
+            self.w.destroy()
 
     def erro(self, exc, val, tb):
         """Erros de callbacks: mostra na barra de status e grava em um .log
@@ -288,11 +305,11 @@ class App:
             self.pai_na_raiz = False
             self.definir_raiz(os.path.normpath(p))
 
-    def atualizar(self):
-        self.scanner.clear_cache()
+    def atualizar_cache(self):
+        """Revarre so a pasta selecionada e corrige os ancestrais."""
         sel = self.tree.selection()
         if sel and sel[0] in self.nos:
-            self.analisar(self.nos[sel[0]])
+            self.analisar(self.nos[sel[0]], revarrer=True)
 
     def abrir_explorer(self):
         sel = self.tree.selection()
@@ -338,7 +355,7 @@ class App:
                 self.status.config(text="Para somar, selecione pastas que estejam "
                                         "dentro da mesma pasta.", fg=COR_TEXTO)
 
-    def analisar(self, path, marcar=()):
+    def analisar(self, path, marcar=(), revarrer=False):
         self.token += 1
         tok = self.token
         self.marcar = set(marcar)
@@ -358,22 +375,25 @@ class App:
         self.tab.delete(*self.tab.get_children())
         self.linhas.clear()
         self.ids, self.lista, self.sel_idx = [], [], set()
-        threading.Thread(target=self.trabalho, args=(path, tok, self.marcar), daemon=True).start()
+        threading.Thread(target=self.trabalho,
+                         args=(path, tok, self.marcar, revarrer), daemon=True).start()
 
-    def trabalho(self, path, tok, marcar):
-        resultado = self.analyze_folder.execute(
-            path, self.raiz, self.pai_na_raiz, marcar
-        )
-        self.fila.put((
-            resultado.path,
-            resultado.total,
-            resultado.parent_total,
-            resultado.items,
-            resultado.folder_stats,
-            tok,
-        ))
+    def trabalho(self, path, tok, marcar, revarrer=False):
+        if revarrer:
+            resultado = self.analyze_folder.refresh(
+                path, self.raiz, self.pai_na_raiz, marcar,
+                progresso=lambda p: self.fila_status.put(f"Revarrendo {p}..."),
+            )
+        else:
+            resultado = self.analyze_folder.execute(path, self.raiz, self.pai_na_raiz, marcar)
+        self.fila.put((resultado, tok))
 
     def poll(self):
+        try:
+            while True:
+                self.status.config(text=self.fila_status.get_nowait(), fg=COR_TEXTO)
+        except queue.Empty:
+            pass
         try:
             while True:
                 self.mostrar(*self.fila.get_nowait())
@@ -383,9 +403,17 @@ class App:
             self.w.after(100, self.poll)
 
     # ---------- exibicao ----------
-    def mostrar(self, path, total, total_pai, lista, folder_stats, tok):
+    def mostrar(self, analise, tok):
         if tok != self.token:  # usuario ja clicou em outra pasta
             return
+        path, total, total_pai = analise.path, analise.total, analise.parent_total
+        lista, folder_stats = analise.items, analise.folder_stats
+        self.lbl_cache.config(
+            text=formatar_status_cache(
+                analise.cache_updated_at, analise.global_cache_updated_at, analise.is_outdated
+            ),
+            fg="#B06000" if analise.is_outdated else "#1A7F37",
+        )
         self.lista, self.total, self.sel_idx = lista, total, set()
         resumo_pasta = f"{folder_stats.arquivos} arquivos, {folder_stats.subpastas} subpastas"
         if folder_stats.maior_arquivo_nome:
@@ -424,6 +452,7 @@ class App:
             modificado = formatar_data(getattr(item, "modificado_em", None))
             criado = formatar_data(getattr(item, "criado_em", None))
             perm = getattr(item, "permissoes", "—")
+            cache_em = formatar_data(getattr(item, "cache_updated_at", None), segundos=True)
 
             iid = self.tab.insert(
                 "",
@@ -439,6 +468,7 @@ class App:
                     modificado,
                     criado,
                     perm,
+                    cache_em,
                 ),
             )
             self.ids.append(iid)
