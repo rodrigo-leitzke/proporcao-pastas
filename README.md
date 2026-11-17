@@ -19,6 +19,10 @@ Programa multiplataforma (Windows e macOS), feito em Python, que mostra quanto c
 - Duplo clique em uma subpasta da tabela navega até ela.
 - Botão para abrir a pasta selecionada diretamente no Explorer (Windows) ou no Finder (macOS).
 - Integração opcional com o clique direito do Windows (menu de contexto) e do macOS (Ações Rápidas do Finder).
+- Cache persistente: o que já foi medido fica salvo entre execuções, então reabrir uma pasta é imediato.
+- Mostra na tela a data e hora da última medição da pasta e avisa quando o cache está defasado.
+- Botão "Atualizar cache" revarre apenas a pasta selecionada e corrige os totais das pastas pai.
+- Botão "Mapear discos" varre tudo de uma vez (opcional, com progresso e cancelamento).
 
 ## Requisitos
 
@@ -30,14 +34,14 @@ Programa multiplataforma (Windows e macOS), feito em Python, que mostra quanto c
 
 No Windows:
 ```bash
-python proporcao_pastas.py
-python proporcao_pastas.py "C:\Users\seu_usuario\Documents"
+python proporcao_pastas.py                              # abre em todas as unidades do sistema
+python proporcao_pastas.py "C:\Users\seu_usuario\Documents"  # abre direto nessa pasta
 ```
 
 No macOS:
 ```bash
-python3 proporcao_pastas.py
-python3 proporcao_pastas.py "/Users/seu_usuario/Documents"
+python3 proporcao_pastas.py                            # abre em modo multi-raiz
+python3 proporcao_pastas.py "/Users/seu_usuario/Documents"  # abre direto nessa pasta
 ```
 
 Para adicionar ou remover do menu de clique direito das pastas (somente para o usuário atual, sem administrador):
@@ -54,9 +58,20 @@ python proporcao_pastas.py --remover
 ## Como funciona
 
 - O tamanho de cada pasta é calculado por recursão sobre a estrutura em árvore do sistema de arquivos (`os.scandir`).
-- Os tamanhos ficam em cache: ao calcular a pasta pai, o tamanho de todas as subpastas já fica guardado.
 - O cálculo roda em uma thread separada, então a interface não trava em pastas grandes.
 - Links simbólicos são ignorados, para não contar o mesmo conteúdo duas vezes; pastas sem permissão de leitura contam como 0.
+- O cache fica em um banco SQLite (biblioteca padrão do Python), em
+  `%LOCALAPPDATA%\ProporcaoPastas\cache.db` no Windows e
+  `~/Library/Caches/ProporcaoPastas/cache.db` no macOS. Apagar esse arquivo
+  limpa o cache.
+- Cada pasta medida guarda tamanho, contagem de arquivos e subpastas, maior
+  arquivo, metadados e a data/hora da medição. De cada pasta são guardados os
+  50 maiores arquivos diretos, mais o total do que sobrou — o suficiente para
+  reconstruir a tabela e o gráfico sem ler o disco.
+- A varredura ignora links simbólicos e caminhos que duplicariam a contagem ou
+  travariam a leitura (`WinSxS`, `System Volume Information`, `$Recycle.Bin`,
+  `pagefile.sys`, `hiberfil.sys` e `swapfile.sys` no Windows; `/System/Volumes/Data`,
+  `/dev`, `/proc`, `/net` e `/Volumes/Recovery` no macOS).
 
 ## Organização do código
 
@@ -79,3 +94,16 @@ detalhe de como o sistema de arquivos é consultado.
 
 - O tamanho exibido é o tamanho lógico dos arquivos, não o espaço ocupado em disco. Arquivos do OneDrive/iCloud disponíveis só online contam com o tamanho cheio.
 - A primeira leitura de pastas muito grandes pode demorar.
+- O aviso de cache defasado compara a data de modificação da pasta e das
+  subpastas diretas. Uma alteração mais profunda na árvore não é detectada: a
+  pasta pode aparecer como atualizada estando defasada. O cache também é
+  considerado defasado depois de 7 dias.
+- Depois de "Atualizar cache" em uma subpasta, os totais das pastas pai são
+  corrigidos pela diferença daquela subpasta; alterações feitas em pastas irmãs
+  no mesmo período continuam invisíveis até que elas também sejam atualizadas.
+- O banco de cache guarda caminhos e nomes de arquivos em texto plano no
+  diretório de cache do usuário.
+- O "Maior Arquivo" de uma pasta é o maior entre os arquivos dela e os das
+  subpastas que já foram medidas. Se uma subpasta nunca foi aberta nem mapeada,
+  ela não entra nessa comparação, então o valor exibido pode ser menor que o
+  real até que a subpasta seja medida.
