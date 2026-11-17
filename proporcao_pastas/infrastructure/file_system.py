@@ -192,16 +192,18 @@ class FileSystemScanner:
         novo = self.stats(path, usar_cache=False)
         if progresso:
             progresso(path)
-        if antigo is not None:
-            ancestrais_corrigidos = self._storage.aplicar_delta(
-                path,
-                novo.tamanho - antigo.tamanho,
-                novo.arquivos - antigo.arquivos,
-                novo.subpastas - antigo.subpastas,
-            )
-            with self._lock:
-                for ancestral in ancestrais_corrigidos:
-                    self._stats_cache.pop(ancestral, None)
+        # Pasta que nao estava em cache conta como zero, nao como "sem correcao":
+        # se algum ancestral esta em cache, _varrer ja gravou todos os descendentes
+        # dele na epoca, logo uma pasta fora do cache abaixo dele e realmente nova.
+        # Nesse caso o pai ganhou a propria pasta (1) mais toda a subarvore dela.
+        # Se nenhum ancestral esta em cache, ancestrais() volta [] e nada muda.
+        d_tam = novo.tamanho - (antigo.tamanho if antigo else 0)
+        d_arq = novo.arquivos - (antigo.arquivos if antigo else 0)
+        d_sub = novo.subpastas - (antigo.subpastas if antigo else 0) + (0 if antigo else 1)
+        ancestrais_corrigidos = self._storage.aplicar_delta(path, d_tam, d_arq, d_sub)
+        with self._lock:
+            for ancestral in ancestrais_corrigidos:
+                self._stats_cache.pop(ancestral, None)
         return novo
 
     def mapear_raizes(self, raizes: List[str], progresso=None, cancelado=None) -> int:

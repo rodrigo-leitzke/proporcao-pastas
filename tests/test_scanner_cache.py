@@ -109,6 +109,26 @@ class TestScannerComCache(unittest.TestCase):
         self.assertEqual(self.storage.get_folder(self.raiz).tamanho, 175)
         self.assertEqual(self.storage.get_folder(self.raiz).arquivos, 3)
 
+    def test_refresh_folder_de_pasta_nova_corrige_os_ancestrais(self):
+        # pasta que nunca esteve em cache: o delta tem que valer "novo - 0",
+        # mais 1 subpasta (a propria pasta nova) na contagem recursiva do pai
+        self.scanner.stats(self.raiz)
+        novo = os.path.join(self.raiz, "novo")
+        escrever(os.path.join(novo, "d.bin"), b"d" * 400)
+        escrever(os.path.join(novo, "dentro", "e.bin"), b"e" * 100)
+        medido = self.scanner.refresh_folder(novo)
+        self.assertEqual(medido.tamanho, 500)
+        self.assertEqual(medido.subpastas, 1)
+        raiz_gravada = self.storage.get_folder(self.raiz)
+        self.assertEqual(raiz_gravada.tamanho, 650)
+        self.assertEqual(raiz_gravada.arquivos, 4)
+        self.assertEqual(raiz_gravada.subpastas, 1 + medido.subpastas + 1)
+        self.assertEqual(self.scanner.stats(self.raiz).tamanho, 650)
+        # o total da raiz tem que bater com a soma dos filhos gravados
+        filhos = self.storage.get_subfolders(self.raiz)
+        soma_filhos = sum(f.tamanho for f in filhos)
+        self.assertEqual(raiz_gravada.tamanho, soma_filhos + 100)  # 100 = a.bin direto
+
     def test_refresh_folder_corrige_maior_arquivo_do_ancestral(self):
         escrever(os.path.join(self.raiz, "sub", "enorme.bin"), b"g" * 5000)
         self.scanner.stats(self.raiz)
