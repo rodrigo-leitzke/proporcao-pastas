@@ -46,7 +46,10 @@ class AnalyzeFolder:
 
     def _montar(self, path, root, include_root_parent, keep, folder_stats) -> FolderAnalysis:
         parent, has_parent = parent_analysis_path(path, root, include_root_parent)
-        parent_total = self.scanner.size(parent) if has_parent else None
+        # pai so e medido se valer a pena: uma raiz de disco fora do cache
+        # custaria minutos de varredura que o usuario nao pediu
+        medir_pai = has_parent and self.scanner.pai_mensuravel(parent)
+        parent_total = self.scanner.size(parent) if medir_pai else None
         return FolderAnalysis(
             path=path,
             total=folder_stats.tamanho,

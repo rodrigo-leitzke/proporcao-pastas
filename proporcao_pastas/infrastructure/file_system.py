@@ -12,7 +12,7 @@ from proporcao_pastas.infrastructure.cache_storage import (
     CachedFile,
     CachedFolder,
 )
-from proporcao_pastas.infrastructure.system_roots import caminho_ignorado
+from proporcao_pastas.infrastructure.system_roots import caminho_ignorado, list_system_roots
 
 IDADE_MAXIMA_CACHE_SEG = 7 * 24 * 3600
 # a cada quantas pastas medidas a varredura total avisa o progresso: uma a uma
@@ -44,6 +44,12 @@ class FileSystemScanner:
         # com self._lock (cache em memoria) nem com o lock do storage, entao nao
         # ha como dois deles se cruzarem.
         self._lock_varredura = threading.RLock()
+        # Pastas cuja ultima medicao nao gerou linha no banco (o os.scandir
+        # delas falhou). O pai nao pode contar uma pasta sem linha: ele somaria
+        # 1 em subpastas agora e, no proximo "Atualizar cache" dessa pasta,
+        # somaria o mesmo 1 de novo (ali ela aparece como pasta nova, porque
+        # nao tem linha). Contagem do pai = soma das filhas que tem linha.
+        self._sem_linha = set()
 
     def clear_cache(self) -> None:
         with self._lock:
@@ -115,6 +121,8 @@ class FileSystemScanner:
                                 entry.path, usar_cache, cancelado, progresso
                             )
                             interrompida = interrompida or sub_interrompida
+                            if self._storage is not None and self._sem_linha_de(entry.path):
+                                continue  # sem linha no banco: nao entra na conta
                             total += sub.tamanho
                             arquivos += sub.arquivos
                             subpastas += 1 + sub.subpastas
@@ -160,6 +168,10 @@ class FileSystemScanner:
             # mostraria o numero errado depois de um cancelamento
             with self._lock:
                 self._stats_cache[path] = resultado
+                if listou:
+                    self._sem_linha.discard(path)
+                else:
+                    self._sem_linha.add(path)
             if self._storage is not None and listou:
                 self._gravar(path, resultado, diretos, maior_direto_nome,
                              maior_direto_tam, agora)
@@ -200,8 +212,25 @@ class FileSystemScanner:
             guardados,
         )
 
+    def _sem_linha_de(self, path: str) -> bool:
+        with self._lock:
+            return path in self._sem_linha
+
     def size(self, path: str) -> int:
         return self.stats(path).tamanho
+
+    def pai_mensuravel(self, pai: str) -> bool:
+        """Diz se vale medir a pasta pai so para mostrar a porcentagem.
+
+        Medir uma raiz de disco inteira leva de minutos a dezenas de minutos.
+        Se o pai e uma raiz e ainda nao esta em cache, a analise abre mao da
+        porcentagem em vez de varrer o disco sem o usuario ter pedido; quando a
+        raiz entrar em cache (por 'Mapear discos' ou 'Atualizar cache') a
+        porcentagem volta a aparecer."""
+        if pai.rstrip(os.sep) + os.sep not in [r.rstrip(os.sep) + os.sep
+                                               for r in list_system_roots()]:
+            return True
+        return self._do_cache(pai) is not None
 
     # ---------- validade do cache ----------
     def is_folder_outdated(self, path: str) -> bool:
@@ -288,6 +317,13 @@ class FileSystemScanner:
         for alvo in alvos:
             if cancelado and cancelado():
                 break
+            if self._ja_mapeada(alvo):
+                # ja medida e em dia: pular deixa o mapeamento retomavel, que e
+                # o que permite cancelar para atender o usuario e continuar depois
+                feitos += 1
+                if progresso:
+                    progresso(alvo, feitos, total)
+                continue
             _, interrompida = self._medir(alvo, False, cancelado, passo)
             if interrompida:  # cancelado no meio: nao conta como alvo concluido
                 break
@@ -304,6 +340,14 @@ class FileSystemScanner:
             with self._lock_varredura:
                 self._varrer(raiz, True, cancelado)
         return feitos
+
+    def _ja_mapeada(self, path: str) -> bool:
+        """Pasta com linha no banco e sem sinal de mudanca no disco."""
+        if self._storage is None:
+            return False
+        if self._storage.get_folder(path) is None:
+            return False
+        return not self.is_folder_outdated(path)
 
     # ---------- conteudo ----------
     def children(self, path: str, keep: Iterable[str] = (), max_items: int = 8) -> List[ItemPasta]:
