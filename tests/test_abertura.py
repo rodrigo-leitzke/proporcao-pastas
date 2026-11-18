@@ -82,7 +82,7 @@ class ArvoreFalsa:
 
 
 class TestSelecionarIgnoraSelecaoAutomatica(unittest.TestCase):
-    """Exercita o App.selecionar de verdade, com dublês no lugar dos widgets."""
+    """Exercita o App.selecionar de verdade, com dubles no lugar dos widgets."""
 
     def montar(self, selecao, ignorar):
         app = App.__new__(App)  # sem __init__: nao da para criar janela sem tela

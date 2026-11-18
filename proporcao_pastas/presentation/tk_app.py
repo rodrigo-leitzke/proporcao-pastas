@@ -161,6 +161,7 @@ class App:
         self.fila = queue.Queue()
         self.fila_status = queue.Queue()
         self.cancelar_mapeamento = False
+        self.aguardando_analise = False  # abriu parado, esperando o usuario medir
 
         self.w = master if master is not None else tk.Tk()
         self.w.deiconify()
@@ -319,6 +320,10 @@ class App:
 
         self.tree.bind("<<TreeviewOpen>>", lambda e: self.popular(self.tree.focus()))
         self.tree.bind("<<TreeviewSelect>>", self.selecionar)
+        # ttk nao emite <<TreeviewSelect>> ao clicar no item que ja esta
+        # selecionado; no estado parado isso faria o clique na raiz nao fazer
+        # nada, entao o clique tambem e tratado direto
+        self.tree.bind("<Button-1>", self.clique_arvore, add="+")
 
         # arvore montada uma unica vez: cada selection_set enfileira um
         # <<TreeviewSelect>> e, com ele, uma analise em thread
@@ -436,8 +441,10 @@ class App:
                 list_system_roots(), progresso=progresso,
                 cancelado=lambda: self.cancelar_mapeamento,
             )
-            self.fila_status.put("Mapeamento concluído" if not self.cancelar_mapeamento
-                                 else "Mapeamento cancelado")
+            self.fila_status.put(
+                "Mapeamento concluído" if not self.cancelar_mapeamento
+                else 'Mapeamento interrompido; "Mapear discos" continua de onde parou'
+            )
         except Exception as exc:
             self.falha_em_thread(exc)
         finally:  # sem isto o botao ficaria preso em "Cancelar mapeamento"
@@ -472,6 +479,15 @@ class App:
                 self.tree.selection_set(f)
                 self.tree.see(f)
                 break
+
+    def clique_arvore(self, evento):
+        """Clique na pasta que ja esta selecionada enquanto o programa esta
+        parado: ttk nao muda a selecao, logo nao ha <<TreeviewSelect>>."""
+        if not self.aguardando_analise:
+            return
+        linha = self.tree.identify_row(evento.y)
+        if linha in self.nos and list(self.tree.selection()) == [linha]:
+            self.analisar(self.nos[linha])
 
     # ---------- analise em segundo plano ----------
     def selecionar(self, _evento):
@@ -511,6 +527,7 @@ class App:
         """Abre parado na raiz escolhida, sem varrer o disco (ver
         deve_analisar_na_abertura)."""
         self.pronto = False
+        self.aguardando_analise = True
         self._limpar_painel(path)
         self.uso.config(text="")
         self.lbl_cache.config(
@@ -527,6 +544,13 @@ class App:
         self.token += 1
         tok = self.token
         self.marcar = set(marcar)
+        self.aguardando_analise = False
+        if self.btn_mapear["text"] == "Cancelar mapeamento":
+            # O mapeamento segura o lock da varredura por pasta de primeiro
+            # nivel inteira; esperar por ele deixaria o painel em "Calculando..."
+            # por minutos. Ele para em uma entrada de diretorio e, como pula
+            # alvos ja medidos, "Mapear discos" continua de onde parou.
+            self.cancelar_mapeamento = True
         self.pronto = False
         self._limpar_painel(path)
         self.uso.config(text="Calculando...")
