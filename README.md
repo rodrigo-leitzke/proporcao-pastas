@@ -2,6 +2,11 @@
 
 Programa multiplataforma (Windows e macOS), feito em Python, que mostra quanto cada pasta ocupa em relação à pasta pai, em um clique. Foi desenvolvido como trabalho final da disciplina de Sistemas Operacionais (FURB), aplicando conceitos de gerência de arquivos e organização de diretórios.
 
+## Documentação
+
+- [Como rodar no Windows e no macOS](docs/COMO_RODAR.md) — instalação passo a passo, testes, cache e problemas comuns.
+- [O que o programa faz](docs/FUNCIONALIDADES.md) — a tela, os botões, as colunas, como o cache funciona e a organização do código.
+
 ## O que faz
 
 - Identifica automaticamente o sistema operacional (`Windows` ou `macOS` / `Darwin`) ao iniciar.
@@ -23,7 +28,7 @@ Programa multiplataforma (Windows e macOS), feito em Python, que mostra quanto c
 - Cache persistente: o que já foi medido fica salvo entre execuções, então reabrir uma pasta é imediato.
 - Mostra na tela a data e hora da última medição da pasta e avisa quando o cache está defasado.
 - Botão "Atualizar cache" revarre apenas a pasta selecionada e corrige os totais das pastas pai.
-- Botão "Mapear discos" varre tudo de uma vez (opcional, com progresso e cancelamento).
+- Botão "Mapear discos" varre tudo de uma vez (opcional, com progresso e cancelamento). Pula o que já está medido e em dia, então pode ser cancelado e retomado.
 
 ## Requisitos
 
@@ -32,6 +37,9 @@ Programa multiplataforma (Windows e macOS), feito em Python, que mostra quanto c
   - *Nota para macOS com Homebrew:* caso o Python do Homebrew não tenha o `tkinter`, instale com `brew install python-tk`.
 
 ## Como usar
+
+Instalação detalhada, verificação do `tkinter` e solução de problemas estão em
+[docs/COMO_RODAR.md](docs/COMO_RODAR.md).
 
 No Windows:
 ```bash
@@ -64,6 +72,13 @@ python proporcao_pastas.py --remover
   medida na abertura se já estiver em cache (leitura imediata). Sem cache, o
   programa abre parado, esperando você escolher uma pasta na árvore, usar
   "Atualizar cache" ou "Mapear discos" — varrer um disco inteiro leva minutos.
+- Pedir a análise de uma pasta enquanto o "Mapear discos" está rodando
+  interrompe o mapeamento: a pasta escolhida tem prioridade, e o mapeamento
+  continua de onde parou no próximo clique no botão.
+- A porcentagem em relação à pasta pai exige medir a pasta pai. Quando o pai é
+  uma raiz de disco que ainda não está em cache, a análise mostra só o tamanho
+  total, em vez de varrer o disco inteiro sem o usuário ter pedido; a
+  porcentagem passa a aparecer depois que a raiz entra no cache.
 - Links simbólicos são ignorados, para não contar o mesmo conteúdo duas vezes; pastas sem permissão de leitura contam como 0.
 - O cache fica em um banco SQLite (biblioteca padrão do Python), em
   `%LOCALAPPDATA%\ProporcaoPastas\cache.db` no Windows e
@@ -110,6 +125,10 @@ detalhe de como o sistema de arquivos é consultado.
   programa for encerrado exatamente entre os dois passos, as pastas pai ficam
   contando uma subárvore cujas linhas já não existem, e o total delas aparece
   maior que o real; atualizar aquela subpasta de novo corrige.
+- Uma pasta que não pôde ser lida (sem permissão, unidade fora do ar) conta como
+  0 e não entra no cache nem na contagem de subpastas da pasta pai, para que o
+  número não fique errado quando ela for medida depois. Enquanto isso, o total
+  da pasta pai não inclui o conteúdo dela.
 - O banco de cache guarda caminhos e nomes de arquivos em texto plano no
   diretório de cache do usuário.
 - O "Maior Arquivo" de uma pasta é o maior entre os arquivos dela e os das
