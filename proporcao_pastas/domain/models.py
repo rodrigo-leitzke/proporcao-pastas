@@ -10,6 +10,7 @@ class FolderStats:
     subpastas: int = 0
     maior_arquivo_nome: str = ""
     maior_arquivo_tam: int = 0
+    cache_updated_at: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -24,6 +25,7 @@ class ItemPasta:
     permissoes: str = "—"
     tipo_detalhado: str = "—"
     maior_arquivo: str = "—"
+    cache_updated_at: Optional[float] = None
 
     def __iter__(self):
         """Permite a transicao gradual do formato de tupla legado."""
