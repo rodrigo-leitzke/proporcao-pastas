@@ -9,7 +9,6 @@ from proporcao_pastas.infrastructure.windows_context_menu import configure_conte
 def main() -> None:
     sistema = platform.system()
     is_windows = sistema == "Windows" or os.name == "nt"
-    is_mac = sistema == "Darwin" or sys.platform == "darwin"
 
     arg = sys.argv[1] if len(sys.argv) > 1 else None
     if arg in ("--instalar", "--remover"):
@@ -21,9 +20,8 @@ def main() -> None:
         )
         return
 
-    from tkinter import filedialog
-    import tkinter as tk
     from proporcao_pastas.presentation.tk_app import App
+    from proporcao_pastas.infrastructure.system_roots import list_system_roots
 
     if arg:
         path, include_root_parent = os.path.expanduser(arg.strip('"')), True
@@ -31,22 +29,12 @@ def main() -> None:
             path += "\\"
         if path:
             App(os.path.normpath(os.path.abspath(path)), include_root_parent).rodar()
-    else:
-        root = tk.Tk()
-        root.withdraw()
-        if is_mac:
-            root.update_idletasks()
-        path, include_root_parent = filedialog.askdirectory(
-            title="Escolha a pasta inicial"
-        ), False
-        if path:
-            App(
-                os.path.normpath(os.path.abspath(path)),
-                include_root_parent,
-                master=root,
-            ).rodar()
-        else:
-            root.destroy()
+        return
+
+    raizes = list_system_roots()
+    # as raizes vao no construtor: montar a arvore duas vezes dispararia duas
+    # analises em thread, e a primeira seguiria varrendo o disco em vao
+    App(raizes[0], False, raizes=raizes).rodar()
 
 
 if __name__ == "__main__":

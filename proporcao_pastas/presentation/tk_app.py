@@ -5,7 +5,7 @@ Ao selecionar varios itens da tabela (Ctrl/Cmd/Shift+clique) ou fatias da pizza,
 soma os selecionados e mostra quanto representam da pasta.
 
 Uso:
-    python proporcao_pastas.py                 abre e pergunta a pasta inicial
+    python proporcao_pastas.py                 abre nas raizes do sistema, sem varrer disco
     python proporcao_pastas.py "C:\\Users\\x"   abre direto nessa pasta (Windows)
     python proporcao_pastas.py "/Users/x"      abre direto nessa pasta (macOS)
     python proporcao_pastas.py --instalar      adiciona ao menu de clique direito
@@ -17,6 +17,7 @@ import math
 import os
 import platform
 import queue
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -29,10 +30,13 @@ from proporcao_pastas.domain.formatting import (
     clarear_cor as clarear,
     formatar_contagem,
     formatar_data,
+    formatar_status_cache,
     formatar_tamanho as fmt,
     formatar_tipo_item,
 )
-from proporcao_pastas.infrastructure.file_system import FileSystemScanner
+from proporcao_pastas.infrastructure.cache_storage import SqliteCacheStorage, caminho_padrao_cache
+from proporcao_pastas.infrastructure.file_system import FileSystemScanner, raiz_de
+from proporcao_pastas.infrastructure.system_roots import list_system_roots
 
 SISTEMA = platform.system()
 IS_MAC = SISTEMA == "Darwin" or sys.platform == "darwin"
@@ -56,6 +60,62 @@ RAIO = 132
 RAIO_FURO = 65
 EXPLOSAO = 8  # quanto as fatias selecionadas saem do centro
 
+# sentinela colocada na fila_status pela thread de mapeamento ao terminar;
+# poll (thread principal) reconhece e restaura o botao, sem imprimir na barra
+FIM_MAPEAMENTO = "\x00fim-mapeamento"
+# mensagens de falha vao pela mesma fila_status; o prefixo diz ao poll que a
+# linha e um erro e deve sair em vermelho
+PREFIXO_ERRO = "Erro: "
+
+# colunas da tabela de detalhes, na ordem em que valores_da_linha as monta
+COLUNAS_TABELA = ("tam", "pct", "tipo", "itens", "maior",
+                  "modificado", "criado", "perm", "cache")
+
+
+def valores_da_linha(item, pct):
+    """Valores de uma linha da tabela, na ordem de COLUNAS_TABELA."""
+    nome, tamanho, eh_pasta = item[0], item[1], item[2]
+    return (
+        fmt(tamanho),
+        f"{pct:.1f}%",
+        getattr(item, "tipo_detalhado", None) or formatar_tipo_item(nome, eh_pasta),
+        formatar_contagem(eh_pasta, getattr(item, "arquivos", 0),
+                          getattr(item, "subpastas", 0)),
+        getattr(item, "maior_arquivo", "—"),
+        formatar_data(getattr(item, "modificado_em", None)),
+        formatar_data(getattr(item, "criado_em", None)),
+        getattr(item, "permissoes", "—"),
+        formatar_data(getattr(item, "cache_updated_at", None), segundos=True),
+    )
+
+
+def abrir_cache():
+    """Abre o cache em disco. Devolve (storage, aviso).
+
+    Se nem apagar e refazer o banco resolver, devolve storage None: o scanner
+    funciona sem cache (mede tudo na hora, como antes desta funcionalidade),
+    e abrir o programa sem cache e melhor que nao abrir."""
+    try:
+        return SqliteCacheStorage(caminho_padrao_cache()), ""
+    except (sqlite3.DatabaseError, OSError) as exc:
+        return None, f"Cache desativado: não foi possível abrir o banco ({exc})"
+
+
+def deve_analisar_na_abertura(raiz, storage) -> bool:
+    """Diz se a pasta inicial pode ser analisada ja na abertura.
+
+    Varrer uma raiz de disco inteira leva de minutos a dezenas de minutos, e a
+    analise comum nao tem progresso nem cancelamento (isso e o 'Mapear discos').
+    Entao, no modo multi-raiz, so analisa de cara a raiz que ja esta em cache,
+    onde a leitura e instantanea. Sem cache, o programa abre parado."""
+    if storage is None:
+        return False
+    try:
+        return storage.get_folder(raiz) is not None
+    except sqlite3.DatabaseError:
+        return False  # problema no cache nao pode impedir a janela de abrir
+
+
 # ---------------------------------------------------------------- icones
 def icone_pasta(master):
     """Pasta amarela 16x16 desenhada pixel a pixel (sem arquivos externos)."""
@@ -74,10 +134,17 @@ def quadrado(master, cor):
 
 # ---------------------------------------------------------------- interface
 class App:
-    def __init__(self, raiz, pai_na_raiz, master=None):
+    def __init__(self, raiz, pai_na_raiz, master=None, storage=None, raizes=None):
         self.pai_na_raiz = pai_na_raiz
         self.raiz = raiz
-        self.scanner = FileSystemScanner()
+        self.raizes = list(raizes) if raizes else [raiz]
+        self.ignorar_selecao = None  # id da arvore cuja selecao automatica nao analisa
+        self.aviso_cache = ""
+        if storage is not None:
+            self.storage = storage
+        else:
+            self.storage, self.aviso_cache = abrir_cache()
+        self.scanner = FileSystemScanner(storage=self.storage)
         self.analyze_folder = AnalyzeFolder(self.scanner)
         self.token = 0
         self.pronto = False      # False enquanto a analise esta em andamento
@@ -92,6 +159,9 @@ class App:
         self.pct_sel = None      # % dos selecionados em relacao a pasta atual
         self.marcar = set()      # nomes a pre-selecionar na tabela (multi-selecao na arvore)
         self.fila = queue.Queue()
+        self.fila_status = queue.Queue()
+        self.cancelar_mapeamento = False
+        self.aguardando_analise = False  # abriu parado, esperando o usuario medir
 
         self.w = master if master is not None else tk.Tk()
         self.w.deiconify()
@@ -144,7 +214,11 @@ class App:
         self.endereco = tk.StringVar()
         ttk.Entry(barra, textvariable=self.endereco, state="readonly").pack(
             side="left", fill="x", expand=True, padx=6)
-        ttk.Button(barra, text="Atualizar", command=self.atualizar).pack(side="left", padx=2)
+        ttk.Button(barra, text="Atualizar cache", command=self.atualizar_cache).pack(
+            side="left", padx=2)
+        self.btn_mapear = ttk.Button(barra, text="Mapear discos",
+                                     command=self.mapear_discos)
+        self.btn_mapear.pack(side="left", padx=2)
         ttk.Button(barra, text="Trocar pasta...", command=self.trocar).pack(side="left", padx=2)
         ttk.Button(barra, text=f"Abrir no {NOME_GERENCIADOR}", command=self.abrir_explorer).pack(side="left", padx=2)
 
@@ -174,6 +248,9 @@ class App:
         self.caminho = tk.Label(txt, bg="white", fg="#666666", font=(FONTE_PADRAO, 9),
                                 anchor="w", justify="left", wraplength=700)
         self.caminho.pack(fill="x")
+        self.lbl_cache = tk.Label(txt, bg="white", fg="#666666", font=("Segoe UI", 9, "bold"),
+                                  anchor="w", justify="left", wraplength=700, text="")
+        self.lbl_cache.pack(fill="x")
 
         # uso da pasta atual em relacao a pasta pai
         self.uso = tk.Label(dir_, bg="white", fg=COR_TEXTO, font=(FONTE_PADRAO, 10), anchor="w")
@@ -203,8 +280,7 @@ class App:
         tab_frame = tk.Frame(self.corpo, bg="white")
         tab_frame.pack(side="left", fill="both", expand=True, padx=(12, 0))
 
-        colunas = ("tam", "pct", "tipo", "itens", "maior", "modificado", "criado", "perm")
-        self.tab = ttk.Treeview(tab_frame, columns=colunas, height=10,
+        self.tab = ttk.Treeview(tab_frame, columns=COLUNAS_TABELA, height=10,
                                 selectmode="extended")
         self.tab.heading("#0", text="Nome", anchor="w")
         self.tab.heading("tam", text="Tamanho", anchor="e")
@@ -215,16 +291,18 @@ class App:
         self.tab.heading("modificado", text="Modificado em", anchor="center")
         self.tab.heading("criado", text="Criado em", anchor="center")
         self.tab.heading("perm", text="Permissões", anchor="center")
+        self.tab.heading("cache", text="Cache atualizado em", anchor="center")
 
         self.tab.column("#0", width=180, minwidth=130, stretch=True)
         self.tab.column("tam", width=85, anchor="e", stretch=False)
         self.tab.column("pct", width=55, anchor="e", stretch=False)
         self.tab.column("tipo", width=95, anchor="w", stretch=False)
         self.tab.column("itens", width=105, anchor="w", stretch=False)
-        self.tab.column("maior", width=150, minwidth=110, anchor="w", stretch=True)
+        self.tab.column("maior", width=130, minwidth=100, anchor="w", stretch=True)
         self.tab.column("modificado", width=115, anchor="center", stretch=False)
         self.tab.column("criado", width=115, anchor="center", stretch=False)
         self.tab.column("perm", width=85, anchor="center", stretch=False)
+        self.tab.column("cache", width=125, anchor="center", stretch=False)
 
         sb_tab_y = ttk.Scrollbar(tab_frame, orient="vertical", command=self.tab.yview)
         sb_tab_x = ttk.Scrollbar(tab_frame, orient="horizontal", command=self.tab.xview)
@@ -242,21 +320,55 @@ class App:
 
         self.tree.bind("<<TreeviewOpen>>", lambda e: self.popular(self.tree.focus()))
         self.tree.bind("<<TreeviewSelect>>", self.selecionar)
+        # ttk nao emite <<TreeviewSelect>> ao clicar no item que ja esta
+        # selecionado; no estado parado isso faria o clique na raiz nao fazer
+        # nada, entao o clique tambem e tratado direto
+        self.tree.bind("<Button-1>", self.clique_arvore, add="+")
 
-        self.definir_raiz(raiz)
+        # arvore montada uma unica vez: cada selection_set enfileira um
+        # <<TreeviewSelect>> e, com ele, uma analise em thread
+        if raizes:
+            self.definir_raizes(
+                self.raizes, analisar=deve_analisar_na_abertura(self.raizes[0], self.storage)
+            )
+        else:  # caminho passado na linha de comando: o usuario pediu essa pasta
+            self.definir_raiz(raiz)
+        if self.aviso_cache:
+            self.status.config(text=self.aviso_cache, fg="#B00020")
+        self.w.protocol("WM_DELETE_WINDOW", self.fechar)
         self.w.after(100, self.poll)
 
-    def erro(self, exc, val, tb):
-        """Erros de callbacks: mostra na barra de status e grava em um .log
-        (com pythonw nao existe console, entao falhas ficariam invisiveis)."""
-        msg = "".join(traceback.format_exception(exc, val, tb))
+    def fechar(self):
+        try:
+            if self.storage is not None:  # None quando o cache nao pudo ser aberto
+                self.storage.close()
+        finally:
+            self.w.destroy()
+
+    def gravar_log(self, msg):
+        """Acrescenta o texto ao .log ao lado do codigo. Com pythonw nao existe
+        console, entao sem isto uma falha nao deixaria rastro nenhum."""
         try:
             log = os.path.join(os.path.dirname(os.path.abspath(__file__)), "proporcao_pastas.log")
             with open(log, "a", encoding="utf-8") as f:
                 f.write(msg + "\n")
         except OSError:
             pass
-        self.status.config(text=f"Erro: {val}  (detalhes em proporcao_pastas.log)", fg="#B00020")
+
+    def erro(self, exc, val, tb):
+        """Erros de callbacks do Tk: mostra na barra de status e grava no .log."""
+        self.gravar_log("".join(traceback.format_exception(exc, val, tb)))
+        self.status.config(text=f"{PREFIXO_ERRO}{val}  (detalhes em proporcao_pastas.log)",
+                           fg="#B00020")
+
+    def falha_em_thread(self, exc):
+        """Erros de thread: report_callback_exception so cobre callback do Tk.
+
+        Sem isto a fila nunca recebe nada, o poll segue rodando e a tela fica em
+        'Calculando...' para sempre, com o traceback indo para um stderr que,
+        com pythonw, nao existe. So pode tocar as filas, nunca o Tk."""
+        self.gravar_log(traceback.format_exc())
+        self.fila_status.put(f"{PREFIXO_ERRO}{exc}  (detalhes em proporcao_pastas.log)")
 
     # ---------- arvore de pastas ----------
     def inserir(self, pai_id, caminho, texto):
@@ -272,27 +384,71 @@ class App:
             for nome in self.scanner.subfolders(self.nos[iid]):
                 self.inserir(iid, os.path.join(self.nos[iid], nome), nome)
 
-    def definir_raiz(self, caminho):
-        self.raiz = caminho
+    def definir_raizes(self, caminhos, analisar=True):
+        self.raizes = list(caminhos)
+        self.raiz = self.raizes[0]
         for i in self.tree.get_children():
             self.tree.delete(i)
         self.nos.clear()
-        iid = self.inserir("", caminho, os.path.basename(caminho) or caminho)
-        self.popular(iid)
-        self.tree.item(iid, open=True)
-        self.tree.selection_set(iid)
+        primeiro = None
+        for caminho in self.raizes:
+            iid = self.inserir("", caminho, os.path.basename(caminho.rstrip(os.sep)) or caminho)
+            primeiro = primeiro or iid
+        if primeiro:
+            self.popular(primeiro)
+            self.tree.item(primeiro, open=True)
+            # selection_set enfileira um <<TreeviewSelect>>, que cai em
+            # selecionar(); guardar o id deixa selecionar() ignorar so essa
+            # selecao automatica, sem engolir o proximo clique do usuario
+            self.ignorar_selecao = None if analisar else primeiro
+            self.tree.selection_set(primeiro)
+            if not analisar:
+                self.mostrar_sem_analise(self.raiz)
+
+    def definir_raiz(self, caminho):
+        self.definir_raizes([caminho])
 
     def trocar(self):
         p = filedialog.askdirectory(title="Escolha a pasta inicial", initialdir=self.raiz)
         if p:
             self.pai_na_raiz = False
-            self.definir_raiz(os.path.normpath(p))
+            self.definir_raizes([os.path.normpath(p)])
 
-    def atualizar(self):
-        self.scanner.clear_cache()
+    def atualizar_cache(self):
+        """Revarre so a pasta selecionada e corrige os ancestrais."""
         sel = self.tree.selection()
         if sel and sel[0] in self.nos:
-            self.analisar(self.nos[sel[0]])
+            self.analisar(self.nos[sel[0]], revarrer=True)
+
+    def mapear_discos(self):
+        """Varredura completa das raizes, em thread, com progresso na barra."""
+        if self.btn_mapear["text"] == "Cancelar mapeamento":
+            self.cancelar_mapeamento = True
+            return
+        self.cancelar_mapeamento = False
+        self.btn_mapear.config(text="Cancelar mapeamento")
+        threading.Thread(target=self._mapear, daemon=True).start()
+
+    def _mapear(self):
+        """Roda em thread separada: so toca a fila_status, nunca o Tk direto."""
+        def progresso(caminho, feitos, total):
+            self.fila_status.put(f"Mapeando {feitos}/{total}: {caminho}")
+
+        try:
+            # le as raizes do sistema de novo: trocar() reduz self.raizes a uma
+            # pasta so, e o botao promete mapear os discos
+            self.scanner.mapear_raizes(
+                list_system_roots(), progresso=progresso,
+                cancelado=lambda: self.cancelar_mapeamento,
+            )
+            self.fila_status.put(
+                "Mapeamento concluído" if not self.cancelar_mapeamento
+                else 'Mapeamento interrompido; "Mapear discos" continua de onde parou'
+            )
+        except Exception as exc:
+            self.falha_em_thread(exc)
+        finally:  # sem isto o botao ficaria preso em "Cancelar mapeamento"
+            self.fila_status.put(FIM_MAPEAMENTO)
 
     def abrir_explorer(self):
         sel = self.tree.selection()
@@ -324,8 +480,21 @@ class App:
                 self.tree.see(f)
                 break
 
+    def clique_arvore(self, evento):
+        """Clique na pasta que ja esta selecionada enquanto o programa esta
+        parado: ttk nao muda a selecao, logo nao ha <<TreeviewSelect>>."""
+        if not self.aguardando_analise:
+            return
+        linha = self.tree.identify_row(evento.y)
+        if linha in self.nos and list(self.tree.selection()) == [linha]:
+            self.analisar(self.nos[linha])
+
     # ---------- analise em segundo plano ----------
     def selecionar(self, _evento):
+        if self.ignorar_selecao is not None:
+            alvo, self.ignorar_selecao = self.ignorar_selecao, None
+            if list(self.tree.selection()) == [alvo]:
+                return  # selecao feita por definir_raizes, nao pelo usuario
         sel = [i for i in self.tree.selection() if i in self.nos]
         if len(sel) == 1:
             self.analisar(self.nos[sel[0]])
@@ -338,17 +507,11 @@ class App:
                 self.status.config(text="Para somar, selecione pastas que estejam "
                                         "dentro da mesma pasta.", fg=COR_TEXTO)
 
-    def analisar(self, path, marcar=()):
-        self.token += 1
-        tok = self.token
-        self.marcar = set(marcar)
-        self.pronto = False
+    def _limpar_painel(self, path):
+        """Zera o painel da direita e passa a mostrar o caminho informado."""
         self.endereco.set(path)
         self.nome.config(text=os.path.basename(path) or path)
         self.caminho.config(text=path)
-        self.uso.config(text="Calculando...")
-        self.status.config(text="Calculando... (a primeira leitura de pastas grandes pode demorar)",
-                           fg=COR_TEXTO)
         self.pct = None
         self.desenhar_barra(self.barra, None)
         self.pct_sel = None
@@ -358,34 +521,93 @@ class App:
         self.tab.delete(*self.tab.get_children())
         self.linhas.clear()
         self.ids, self.lista, self.sel_idx = [], [], set()
-        threading.Thread(target=self.trabalho, args=(path, tok, self.marcar), daemon=True).start()
+        self.total = 0
 
-    def trabalho(self, path, tok, marcar):
-        resultado = self.analyze_folder.execute(
-            path, self.raiz, self.pai_na_raiz, marcar
+    def mostrar_sem_analise(self, path):
+        """Abre parado na raiz escolhida, sem varrer o disco (ver
+        deve_analisar_na_abertura)."""
+        self.pronto = False
+        self.aguardando_analise = True
+        self._limpar_painel(path)
+        self.uso.config(text="")
+        self.lbl_cache.config(
+            text=self.aviso_cache or formatar_status_cache(None, None, False),
+            fg="#B00020" if self.aviso_cache else "#666666",
         )
-        self.fila.put((
-            resultado.path,
-            resultado.total,
-            resultado.parent_total,
-            resultado.items,
-            resultado.folder_stats,
-            tok,
-        ))
+        self.status.config(
+            text='Selecione uma pasta na árvore, ou use "Atualizar cache" ou '
+                 '"Mapear discos" para medir.',
+            fg=COR_TEXTO,
+        )
+
+    def analisar(self, path, marcar=(), revarrer=False):
+        self.token += 1
+        tok = self.token
+        self.marcar = set(marcar)
+        self.aguardando_analise = False
+        if self.btn_mapear["text"] == "Cancelar mapeamento":
+            # O mapeamento segura o lock da varredura por pasta de primeiro
+            # nivel inteira; esperar por ele deixaria o painel em "Calculando..."
+            # por minutos. Ele para em uma entrada de diretorio e, como pula
+            # alvos ja medidos, "Mapear discos" continua de onde parou.
+            self.cancelar_mapeamento = True
+        self.pronto = False
+        self._limpar_painel(path)
+        self.uso.config(text="Calculando...")
+        self.status.config(text="Calculando... (a primeira leitura de pastas grandes pode demorar)",
+                           fg=COR_TEXTO)
+        threading.Thread(target=self.trabalho,
+                         args=(path, tok, self.marcar, revarrer), daemon=True).start()
+
+    def trabalho(self, path, tok, marcar, revarrer=False):
+        try:
+            raiz = raiz_de(path, self.raizes)
+            if revarrer:
+                resultado = self.analyze_folder.refresh(
+                    path, raiz, self.pai_na_raiz, marcar,
+                    progresso=lambda p: self.fila_status.put(f"Revarrendo {p}..."),
+                )
+            else:
+                resultado = self.analyze_folder.execute(path, raiz, self.pai_na_raiz, marcar)
+            self.fila.put((resultado, tok))
+        except Exception as exc:  # sem isto a tela ficaria em "Calculando..."
+            self.falha_em_thread(exc)
 
     def poll(self):
         try:
-            while True:
-                self.mostrar(*self.fila.get_nowait())
-        except queue.Empty:
-            pass
-        finally:  # um erro em mostrar() nao pode parar as proximas atualizacoes
+            try:
+                while True:
+                    msg = self.fila_status.get_nowait()
+                    if msg == FIM_MAPEAMENTO:
+                        self.btn_mapear.config(text="Mapear discos")
+                        continue
+                    self.status.config(
+                        text=msg,
+                        fg="#B00020" if msg.startswith(PREFIXO_ERRO) else COR_TEXTO,
+                    )
+            except queue.Empty:
+                pass
+            try:
+                while True:
+                    self.mostrar(*self.fila.get_nowait())
+            except queue.Empty:
+                pass
+        finally:  # um erro em qualquer um dos dois drenos nao pode parar as proximas atualizacoes
             self.w.after(100, self.poll)
 
     # ---------- exibicao ----------
-    def mostrar(self, path, total, total_pai, lista, folder_stats, tok):
+    def mostrar(self, analise, tok):
         if tok != self.token:  # usuario ja clicou em outra pasta
             return
+        path, total, total_pai = analise.path, analise.total, analise.parent_total
+        lista, folder_stats = analise.items, analise.folder_stats
+        self.lbl_cache.config(
+            text=self.aviso_cache or formatar_status_cache(
+                analise.cache_updated_at, analise.global_cache_updated_at, analise.is_outdated
+            ),
+            fg="#B00020" if self.aviso_cache
+            else ("#B06000" if analise.is_outdated else "#1A7F37"),
+        )
         self.lista, self.total, self.sel_idx = lista, total, set()
         resumo_pasta = f"{folder_stats.arquivos} arquivos, {folder_stats.subpastas} subpastas"
         if folder_stats.maior_arquivo_nome:
@@ -416,30 +638,12 @@ class App:
         for i, item in enumerate(lista):
             nome, s, eh_pasta = item[0], item[1], item[2]
             cor = CINZA if eh_pasta is None else CORES[i % len(CORES)]
-            tipo = getattr(item, "tipo_detalhado", None) or formatar_tipo_item(nome, eh_pasta)
-            arquivos = getattr(item, "arquivos", 0)
-            subpastas = getattr(item, "subpastas", 0)
-            conteudo = formatar_contagem(eh_pasta, arquivos, subpastas)
-            maior = getattr(item, "maior_arquivo", "—")
-            modificado = formatar_data(getattr(item, "modificado_em", None))
-            criado = formatar_data(getattr(item, "criado_em", None))
-            perm = getattr(item, "permissoes", "—")
-
             iid = self.tab.insert(
                 "",
                 "end",
                 text=nome,
                 image=self.quadrados[cor],
-                values=(
-                    fmt(s),
-                    f"{s / soma * 100:.1f}%",
-                    tipo,
-                    conteudo,
-                    maior,
-                    modificado,
-                    criado,
-                    perm,
-                ),
+                values=valores_da_linha(item, s / soma * 100),
             )
             self.ids.append(iid)
             if eh_pasta:
